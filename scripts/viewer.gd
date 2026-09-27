@@ -3,10 +3,15 @@ extends Node3D
 
 const TNData = preload("res://scripts/tn_data.gd")
 const Terrain = preload("res://scripts/terrain.gd")
+const TNObjects = preload("res://scripts/tn_objects.gd")
 const GROUND = preload("res://terrain.gdshader")
 const CFG := "user://viewer.cfg"
 
 var data = TNData.new()
+var objects = TNObjects.new()
+var objects_ok := false
+var pal := PackedColorArray()   # 256-color palette of the current planet
+var pal_key := ""
 var world: Node3D
 var camera: Camera3D
 var ui: CanvasLayer
@@ -36,6 +41,7 @@ func _ready() -> void:
 	if root == "" or not data.setup(root):
 		_ask_path("Terra Nova folder not found. Paste the game folder (the one containing TNOVA):")
 		return
+	objects_ok = objects.setup(data.data_dir())
 	_fill_list()
 	var args := OS.get_cmdline_user_args()
 	if "--all" in args:                       # test: load every mission, then quit
@@ -155,11 +161,14 @@ func _on_path(t: String) -> void:
 	cfg.set_value("game", "root", root)
 	cfg.save(CFG)
 	path_edit.visible = false
+	objects_ok = objects.setup(data.data_dir())
 	_fill_list()
 
 
 func _fill_list() -> void:
 	missions = data.mission_list()
+	if objects_ok:
+		missions.append({"label": "Gallery  all 3D models", "file": "", "gallery": true})
 	list.clear()
 	for m in missions:
 		list.add_item(m["label"])
@@ -180,6 +189,9 @@ func _load(index: int) -> void:
 	info.text = "Loading %s..." % entry["label"]
 	await get_tree().process_frame
 	await get_tree().process_frame
+	if entry.get("gallery", false):
+		_load_gallery()
+		return
 	var t0 := Time.get_ticks_msec()
 	var mis: Dictionary = data.load_mission(entry["file"])
 	if mis.is_empty():
@@ -215,6 +227,8 @@ func _load(index: int) -> void:
 		plane.material_override = mats["water"]
 		plane.position = Vector3(256, wl + 0.12, 256)
 		world.add_child(plane)
+	pal = pl["palette"] if pl.has("palette") else data.full_palette(PackedByteArray())
+	pal_key = m["planet"]
 	var nveg := _add_vegetation(m)
 	var counts := {}
 	for e in mis["entities"]:
@@ -234,13 +248,14 @@ func _load(index: int) -> void:
 		_screenshot(args[s + 1])
 
 
-# Vegetation generated like the engine does (see TNData.load_map): one MultiMesh per plant shape.
+# Vegetation generated like the engine does (see TNData.load_map). Each plant is a decor type whose
+# sprite (or model) comes from RESTNOBJ: one MultiMesh per sprite.
 func _add_vegetation(m: Dictionary) -> int:
 	var vmap: PackedByteArray = m["veg_map"]
 	var sets: Array = m["veg_sets"]
 	if vmap.size() < 128 * 128:
 		return 0
-	var groups := {}                  # shape -> Array[Transform3D]
+	var groups := {}                  # sprite / model ref (or stand-in shape name) -> Array[Transform3D]
 	var n := 0
 	for cx in 128:
 		for cy in 128:
@@ -250,59 +265,187 @@ func _add_vegetation(m: Dictionary) -> int:
 			for it in sets[v - 1]:
 				var x: float = cx * 4.0 + it["ox"]
 				var y: float = cy * 4.0 + it["oy"]
-				var name: String = data.type_name(it["cls"], it["sub"]).to_lower()
-				var shape := "rock" if name.contains("rocher") or name.contains("rock") else (
-						"bush" if name.contains("buisson") or name.contains("bush") else "tree")
-				# small deterministic variety in size and turn
-				var hsh := absi(int(x * 73.0) * 31 + int(y * 57.0) * 17 + it["sub"] * 13)
-				var sc := 0.75 + float(hsh % 50) / 100.0
-				var basis := Basis(Vector3.UP, float(hsh % 628) / 100.0).scaled(Vector3(sc, sc, sc))
-				var ground := TNData.height_at(m, x, y)
-				if not groups.has(shape):
-					groups[shape] = []
-				groups[shape].append(Transform3D(basis, Vector3(x, ground, y)))
+				var key := Vector2i(it["cls"], it["sub"])
+				if not groups.has(key):
+					groups[key] = []
+				groups[key].append(Transform3D(Basis.IDENTITY, Vector3(x, TNData.height_at(m, x, y), y)))
 				n += 1
-	for shape in groups:
-		var mesh: Mesh
-		var mat: Material = mats["tree"]
-		match shape:
-			"tree":
-				var cone := CylinderMesh.new()
-				cone.top_radius = 0.0
-				cone.bottom_radius = 1.1
-				cone.height = 4.5
-				cone.radial_segments = 7
-				cone.rings = 1
-				mesh = cone
-			"bush":
-				var sph := SphereMesh.new()
-				sph.radius = 0.7
-				sph.height = 1.0
-				sph.radial_segments = 8
-				sph.rings = 4
-				mesh = sph
-			_:
-				var bx := BoxMesh.new()
-				bx.size = Vector3(1.6, 1.0, 1.4)
-				mesh = bx
-				mat = mats["rock"]
-		var lift := mesh.get_aabb().size.y * 0.5
+	for key in groups:                # key = (class, type)
+		var mesh: Mesh = null
+		var mat: Material = null
+		var ref: Vector2i = objects.ref_for(key.x, key.y) if objects_ok else Vector2i.ZERO
+		if TNObjects.is_sprite(ref):
+			var sp: Dictionary = objects.sprite(ref, pal, pal_key)
+			if not sp.is_empty():
+				mesh = _sprite_quad(sp, objects.sprite_width(key.x, key.y))
+				mat = _sprite_mat(ref, sp)
+		elif TNObjects.is_model(ref):
+			var md: Dictionary = objects.model(ref, pal, pal_key)
+			if not md.is_empty():
+				mesh = md["mesh"]
+		if mesh == null:
+			var name: String = data.type_name(key.x, key.y).to_lower()
+			var shape := "rock" if name.contains("rocher") or name.contains("rock") else (
+					"bush" if name.contains("buisson") or name.contains("bush") else "tree")
+			mesh = _placeholder(shape)
+			mat = mats["rock"] if shape == "rock" else mats["tree"]
 		var mm := MultiMesh.new()
 		mm.transform_format = MultiMesh.TRANSFORM_3D
 		mm.mesh = mesh
-		var list: Array = groups[shape]
-		mm.instance_count = list.size()
-		for i in list.size():
-			var tr: Transform3D = list[i]
-			tr.origin.y += lift * tr.basis.get_scale().y
-			mm.set_instance_transform(i, tr)
+		var trs: Array = groups[key]
+		mm.instance_count = trs.size()
+		for i in trs.size():
+			mm.set_instance_transform(i, trs[i])
 		var mmi := MultiMeshInstance3D.new()
 		mmi.multimesh = mm
-		mmi.material_override = mat
+		if mat != null:
+			mmi.material_override = mat
 		mmi.add_to_group("vegetation")
 		mmi.visible = veg_on
 		world.add_child(mmi)
 	return n
+
+
+# Simple stand-in shapes, standing on their base, when the game data has no sprite / model.
+func _placeholder(shape: String) -> Mesh:
+	var mesh: PrimitiveMesh
+	match shape:
+		"tree":
+			var cone := CylinderMesh.new()
+			cone.top_radius = 0.0
+			cone.bottom_radius = 1.1
+			cone.height = 4.5
+			cone.radial_segments = 7
+			cone.rings = 1
+			mesh = cone
+		"bush":
+			var sph := SphereMesh.new()
+			sph.radius = 0.7
+			sph.height = 1.0
+			sph.radial_segments = 8
+			sph.rings = 4
+			mesh = sph
+		_:
+			var bx := BoxMesh.new()
+			bx.size = Vector3(1.6, 1.0, 1.4)
+			mesh = bx
+	# lift the shape so that it stands on its base
+	var arrays := mesh.get_mesh_arrays()
+	var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	var up := Vector3(0, mesh.get_aabb().size.y * 0.5, 0)
+	for i in verts.size():
+		verts[i] += up
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	var out := ArrayMesh.new()
+	out.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return out
+
+
+# Sprite (tree, bush, rock, probe): upright quad turning to face the camera, base on the ground.
+func _sprite_quad(sp: Dictionary, width: float) -> QuadMesh:
+	var q := QuadMesh.new()
+	q.size = Vector2(width, width * sp["aspect"])
+	q.center_offset = Vector3(0, q.size.y * 0.5, 0)
+	return q
+
+
+func _sprite_mat(key: Vector2i, sp: Dictionary) -> StandardMaterial3D:
+	var k := "sprite%s" % key
+	if mats.has(k):
+		return mats[k]
+	var sm := StandardMaterial3D.new()
+	sm.albedo_texture = sp["texture"]
+	sm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+	sm.alpha_scissor_threshold = 0.5
+	sm.billboard_mode = BaseMaterial3D.BILLBOARD_FIXED_Y
+	sm.billboard_keep_scale = true
+	sm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED   # the game draws sprites unlit
+	sm.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	sm.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mats[k] = sm
+	return sm
+
+
+# Every model of RESTNOBJ.RES in rows on flat ground (planet 0 colors), each with its file name
+# and the object types that use it. Models face +X (east).
+func _load_gallery() -> void:
+	for c in world.get_children():
+		c.queue_free()
+	var pl: Dictionary = data.load_planet(data.data_dir().path_join("RESPLNT0.RES"))
+	pal = pl["palette"] if pl.has("palette") else data.full_palette(PackedByteArray())
+	pal_key = "RESPLNT0.RES"
+	var users := {}                   # model ref -> names of the object types using it
+	for c in objects.refs:
+		var arr: Array = objects.refs[c]
+		for i in arr.size():
+			var nm: String = data.type_name(c, i).strip_edges()
+			if nm == "" or nm.begins_with("?"):
+				continue
+			if not users.has(arr[i]):
+				users[arr[i]] = PackedStringArray()
+			if not users[arr[i]].has(nm):
+				users[arr[i]].append(nm)
+	var x := 0.0
+	var z := 0.0
+	var depth := 0.0
+	var n := 0
+	for ref in objects.all_models():
+		var md: Dictionary = objects.model(ref, pal, pal_key)
+		if md.is_empty():
+			continue
+		var box: AABB = md["mesh"].get_aabb()
+		if x > 0.0 and x + box.size.x > 70.0:
+			x = 0.0
+			z += depth + 4.0
+			depth = 0.0
+		var mi := MeshInstance3D.new()
+		mi.mesh = md["mesh"]
+		mi.position = Vector3(x - box.position.x, 0.0, z - box.position.z)
+		world.add_child(mi)
+		var l := Label3D.new()
+		var who: PackedStringArray = users.get(ref, PackedStringArray())
+		l.text = md["name"] + ("" if who.is_empty() else "
+" + ", ".join(who))
+		l.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		l.font_size = 32
+		l.pixel_size = 0.01
+		l.outline_size = 8
+		l.position = Vector3(box.get_center().x, md["height"] + 0.4, box.get_center().z)
+		l.add_to_group("labels")
+		l.visible = labels_on
+		mi.add_child(l)
+		x += box.size.x + 2.0
+		depth = maxf(depth, box.size.z)
+		n += 1
+	var ground := MeshInstance3D.new()
+	var pm := PlaneMesh.new()
+	pm.size = Vector2(400, 400)
+	ground.mesh = pm
+	var gm := StandardMaterial3D.new()
+	gm.albedo_color = Color(0.36, 0.4, 0.34)
+	gm.roughness = 1.0
+	ground.material_override = gm
+	ground.position = Vector3(35, -0.01, z * 0.5)
+	world.add_child(ground)
+	yaw = 0.0
+	pitch = -0.3
+	camera.position = Vector3(12, 5, z + depth + 14)
+	var args := OS.get_cmdline_user_args()
+	var c := args.find("--cam")          # test: --cam x,z,height,yaw_deg,pitch_deg
+	if c >= 0 and c + 1 < args.size():
+		var v := args[c + 1].split_floats(",")
+		camera.position = Vector3(v[0], v[2], v[1])
+		yaw = deg_to_rad(v[3])
+		pitch = deg_to_rad(v[4])
+	camera.rotation = Vector3(pitch, yaw, 0)
+	current = {}
+	info.text = "Gallery: %d distinct 3D models from RESTNOBJ.RES
+(file name, then the object types using it)" % n
+	print(info.text.replace("
+", " | "))
+	var sh := args.find("--shot")
+	if sh >= 0 and sh + 1 < args.size():
+		_screenshot(args[sh + 1])
 
 
 func _ground_mat(pl: Dictionary, grid: Dictionary, origin: Vector2, step: float) -> ShaderMaterial:
@@ -319,65 +462,46 @@ func _ground_mat(pl: Dictionary, grid: Dictionary, origin: Vector2, step: float)
 func _add_object(m: Dictionary, cls: int, sub: int, x: float, y: float, heading: float, group: String,
 		label: bool) -> void:
 	var name: String = data.type_name(cls, sub)
+	var low := name.to_lower()
 	var ground := TNData.height_at(m, x, y)
-	var mesh: Mesh
-	var mat: Material
-	var lift := 0.0
-	match cls:
-		0:
-			var low := name.to_lower()
-			if low.contains("arbre") or low.contains("tree"):
-				var cone := CylinderMesh.new()
-				cone.top_radius = 0.0
-				cone.bottom_radius = 1.2
-				cone.height = 5.0
-				mesh = cone
-				mat = mats["tree"]
-			elif low.contains("buisson") or low.contains("bush"):
-				var sph := SphereMesh.new()
-				sph.radius = 0.8
-				sph.height = 1.2
-				mesh = sph
-				mat = mats["tree"]
-			elif low.contains("rocher") or low.contains("rock"):
-				var rb := BoxMesh.new()
-				rb.size = Vector3(2, 1.4, 2)
-				mesh = rb
-				mat = mats["rock"]
-			else:
-				var db := BoxMesh.new()
-				db.size = Vector3(1.2, 1.2, 1.2)
-				mesh = db
-				mat = mats["decor"]
-		1:
-			var u := BoxMesh.new()
-			u.size = Vector3(0.9, 2.2, 0.9)
-			mesh = u
-			mat = mats["friend"] if data.is_friendly(name) else mats["enemy"]
-		2:
-			var vb := BoxMesh.new()
-			vb.size = Vector3(2.2, 1.4, 3.4)
-			mesh = vb
-			mat = mats["friend"] if data.is_friendly(name) else mats["enemy"]
-		3:
-			var ab := PrismMesh.new()
-			ab.size = Vector3(2.5, 0.8, 3.0)
-			mesh = ab
-			mat = mats["friend"] if data.is_friendly(name) else mats["enemy"]
-			# the mission files store no altitude (always 0): ships sit on the ground / dock,
-			# only probes are shown hovering a little
-			var low3 := name.to_lower()
-			lift = 3.0 if low3.contains("sonde") or low3.contains("probe") else 0.0
-		_:
-			var bb := BoxMesh.new()
-			bb.size = Vector3(4, 3, 4)
-			mesh = bb
-			mat = mats["building"]
+	# the mission files store no altitude (always 0): ships sit on the ground / dock,
+	# only probes are shown hovering a little
+	var lift := 3.0 if cls == 3 and (low.contains("sonde") or low.contains("probe")) else 0.0
 	var mi := MeshInstance3D.new()
-	mi.mesh = mesh
-	mi.material_override = mat
-	var aabb := mesh.get_aabb()
-	mi.position = Vector3(x, ground + lift + aabb.size.y * 0.5, y)
+	var top := 0.0
+	var ref: Vector2i = objects.ref_for(cls, sub) if objects_ok else Vector2i.ZERO
+	if TNObjects.is_model(ref):
+		var md: Dictionary = objects.model(ref, pal, pal_key)
+		if not md.is_empty():
+			mi.mesh = md["mesh"]
+			top = md["height"]
+	elif TNObjects.is_sprite(ref):
+		var sp: Dictionary = objects.sprite(ref, pal, pal_key)
+		if not sp.is_empty():
+			var q := _sprite_quad(sp, objects.sprite_width(cls, sub))
+			mi.mesh = q
+			mi.material_override = _sprite_mat(ref, sp)
+			top = q.size.y
+	if mi.mesh == null:                 # nothing in the data (soldiers are animated sprites)
+		var box := BoxMesh.new()
+		match cls:
+			0:
+				box.size = Vector3(1.2, 1.2, 1.2)
+				mi.material_override = mats["decor"]
+			1:
+				box.size = Vector3(0.5, 1.4, 0.5)
+				mi.material_override = mats["friend"] if data.is_friendly(name) else mats["enemy"]
+			2, 3:
+				box.size = Vector3(1.4, 0.8, 1.4)
+				mi.material_override = mats["friend"] if data.is_friendly(name) else mats["enemy"]
+			_:
+				box.size = Vector3(4, 3, 4)
+				mi.material_override = mats["building"]
+		mi.mesh = box
+		top = box.size.y
+		lift += box.size.y * 0.5
+		top -= box.size.y * 0.5
+	mi.position = Vector3(x, ground + lift, y)
 	mi.rotation.y = -heading
 	world.add_child(mi)
 	if label:
@@ -388,7 +512,7 @@ func _add_object(m: Dictionary, cls: int, sub: int, x: float, y: float, heading:
 		l.pixel_size = 0.02
 		l.outline_size = 10
 		l.visibility_range_end = 140.0
-		l.position = Vector3(0, aabb.size.y * 0.5 + 1.2, 0)
+		l.position = Vector3(0, top + 1.0, 0)
 		l.add_to_group("labels")
 		l.visible = labels_on
 		mi.add_child(l)

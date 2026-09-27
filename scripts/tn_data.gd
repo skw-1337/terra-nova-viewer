@@ -18,6 +18,9 @@ const FRIENDLY := ["SFC", "Nikola", "Strike Force", "Centauri"]
 const DETAIL_N := 513        # detailed grid: 513 x 513, 1 unit apart, covers 0..512
 const COARSE_N := 257        # outer grid: 257 x 257, 4 units apart, covers -256..768
 const HEIGHT_SCALE := 0.6875 / 256.0
+const BASE_PALETTE := [0, 0, 0, 156, 189, 189, 135, 163, 163, 103, 135, 131, 87, 119, 115, 72, 104, 96,
+		63, 95, 83, 51, 83, 67, 43, 75, 59, 39, 67, 47, 31, 59, 39, 29, 55, 37, 28, 50, 35, 26, 46, 33,
+		24, 41, 30, 23, 37, 28, 7, 28, 16]
 
 var root := ""               # game folder (contains TNOVA)
 var type_names := {}         # class -> PackedStringArray
@@ -253,6 +256,19 @@ func load_planet(path: String) -> Dictionary:
 	return res
 
 
+# The 256-color game palette: colors 0-16 are fixed (the same in every palette of RESGAME and the
+# helmet files), the planet supplies 17-255 (object textures use 1-145, the ground 146-247).
+func full_palette(planet_pal: PackedByteArray) -> PackedColorArray:
+	var out := PackedColorArray()
+	out.resize(256)
+	for i in 17:
+		out[i] = Color8(BASE_PALETTE[3 * i], BASE_PALETTE[3 * i + 1], BASE_PALETTE[3 * i + 2])
+	for i in range(17, 256):
+		var k := 3 * (i - 17)
+		out[i] = Color8(planet_pal[k], planet_pal[k + 1], planet_pal[k + 2]) if k + 2 < planet_pal.size() else Color.MAGENTA
+	return out
+
+
 func _read_planet(path: String) -> Dictionary:
 	var out := {"ok": false, "count": 64, "tile_color": PackedColorArray(), "textures": null}
 	var fallback := PackedColorArray()
@@ -312,6 +328,7 @@ func _read_planet(path: String) -> Dictionary:
 			continue
 		prof[t] = _profiles(rgb_tiles[t], mat_color[ab.x], mat_color[ab.y])
 	out["ok"] = true
+	out["palette"] = full_palette(pal)
 	out["count"] = count
 	out["tile_color"] = tile_color
 	out["textures"] = arr

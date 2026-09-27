@@ -1,0 +1,485 @@
+# Terra Nova 3D objects (RESTNOBJ.RES): polygon models, their textures and the sprites used for
+# trees, bushes and rocks.
+#
+# A model is a program for the Looking Glass 3D interpreter (the same family as System Shock's):
+# header (name, bounding box, counts, texture list), then bytecode that defines points, relative
+# points, BSP nodes, articulated sub-objects and polygons (flat, textured or wireframe).
+# Opcode sizes were read from the game's own interpreter (jump table at 0x36069c in __FF.EXE).
+extends RefCounted
+
+const LGRes = preload("res://scripts/lgres.gd")
+
+# object class -> [RESTNOBJ table, refs per type]; each ref = u16 frame, u16 resource.
+# Decor and buildings have two refs per type: intact, destroyed.
+const TABLES := {0: [1371, 2], 2: [1372, 1], 3: [1373, 1], 4: [1374, 2]}
+const MODELS := Vector2i(1343, 1362)       # compound resources holding the models
+const SPRITES := Vector2i(1160, 1195)      # sprite / animation bitmaps
+const PROPS := 1364                        # + class: footprint and size of each object type
+# lamp polygons take their color from the object at run time (blinking alarm light)
+const RUNTIME_COLOR := Color(0.95, 0.25, 0.15)
+
+var res                 # RESTNOBJ.RES
+var tex_ref := {}       # global texture index -> Vector2i(resource, frame), from RESMAP.RES 1440
+var refs := {}          # class -> Array of Vector2i(resource, frame) (intact version)
+var props := {}         # class -> Array of property frames (one per type)
+var model_cache := {}
+var tex_cache := {}
+
+
+func setup(data_dir: String) -> bool:
+	res = LGRes.open(data_dir.path_join("RESTNOBJ.RES"))
+	var m = LGRes.open(data_dir.path_join("RESMAP.RES"))
+	if res == null or m == null or not m.has(1440):
+		return false
+	var fr := LGRes.frames(m.data(1440))
+	var t: PackedByteArray = fr[0] if fr.size() > 0 else m.data(1440)
+	for k in range(0, t.size() - 7, 8):
+		var v := t.decode_u32(k + 4)
+		tex_ref[t.decode_u32(k)] = Vector2i(v >> 16, v & 0xFFFF)
+	for c in TABLES:
+		var arr := []
+		var stride: int = TABLES[c][1]
+		for f in LGRes.frames(res.data(TABLES[c][0])):
+			var b: PackedByteArray = f
+			for i in range(0, b.size() / 4, stride):
+				arr.append(Vector2i(b.decode_u16(4 * i + 2), b.decode_u16(4 * i)))
+		refs[c] = arr
+	for c in 7:
+		props[c] = LGRes.frames(res.data(PROPS + c))
+	return true
+
+
+# World width of a type's sprite. The engine scales every sprite to twice the collision radius of
+# its type (property frame: u16 shape kind, u16 index of the radius / height entry, then 8-byte
+# entries) and derives the height from the bitmap's proportions. Default 1/6 (probes).
+func sprite_width(cls: int, sub: int) -> float:
+	var arr: Array = props.get(cls, [])
+	if sub < arr.size():
+		var f: PackedByteArray = arr[sub]
+		if f.size() >= 4:
+			var kind := f.decode_u16(0)
+			var e := 4 + 8 * f.decode_u16(2)
+			if (kind == 2 or kind == 3) and e + 4 <= f.size():
+				return 2.0 * f.decode_s32(e) / 65536.0
+	return 1.0 / 6.0
+
+
+func ref_for(cls: int, sub: int) -> Vector2i:
+	var arr: Array = refs.get(cls, [])
+	return arr[sub] if sub < arr.size() else Vector2i.ZERO
+
+
+static func is_model(ref: Vector2i) -> bool:
+	return ref.x >= MODELS.x and ref.x <= MODELS.y
+
+
+static func is_sprite(ref: Vector2i) -> bool:
+	return ref.x >= SPRITES.x and ref.x <= SPRITES.y
+
+
+# Every distinct model (copies stored twice are listed once).
+func all_models() -> Array:
+	var out := []
+	var seen := {}
+	for rid in range(MODELS.x, MODELS.y + 1):
+		var fr := LGRes.frames(res.data(rid))
+		for i in fr.size():
+			var b: PackedByteArray = fr[i]
+			var h := hash(b)
+			if b.size() < 0x5e or seen.has(h):
+				continue
+			seen[h] = true
+			out.append(Vector2i(rid, i))
+	return out
+
+
+func model_name(ref: Vector2i) -> String:
+	var fr := LGRes.frames(res.data(ref.x))
+	return LGRes.text(fr[ref.y].slice(0, 8)) if ref.y < fr.size() else ""
+
+
+# {"mesh": ArrayMesh, "name": String, "height": float}, or {} when the ref is not a model.
+# Mesh axes: the model's forward axis is +X (heading 0 = east), up is +Y; turn the node by
+# rotation.y = -heading.
+func model(ref: Vector2i, pal: PackedColorArray, pal_key: String) -> Dictionary:
+	var key := "%d/%d/%s" % [ref.x, ref.y, pal_key]
+	if model_cache.has(key):
+		return model_cache[key]
+	var out := {}
+	if is_model(ref):
+		var fr := LGRes.frames(res.data(ref.x))
+		if ref.y < fr.size():
+			out = _build(fr[ref.y], pal, pal_key)
+	model_cache[key] = out
+	return out
+
+
+# Sprite as a texture + height / width ratio, or {}.
+func sprite(ref: Vector2i, pal: PackedColorArray, pal_key: String) -> Dictionary:
+	var key := "s%d/%d/%s" % [ref.x, ref.y, pal_key]
+	if tex_cache.has(key):
+		return tex_cache[key]
+	var out := {}
+	var fr := LGRes.frames(res.data(ref.x))
+	if is_sprite(ref) and ref.y < fr.size():
+		var img := _bitmap(fr[ref.y], pal)
+		if img != null:
+			var aspect := float(img.get_height()) / img.get_width()
+			img.generate_mipmaps()
+			out = {"texture": ImageTexture.create_from_image(img), "aspect": aspect}
+	tex_cache[key] = out
+	return out
+
+
+func _texture(global_index: int, pal: PackedColorArray, pal_key: String) -> Texture2D:
+	var key := "t%d/%s" % [global_index, pal_key]
+	if tex_cache.has(key):
+		return tex_cache[key]
+	var tex: Texture2D = null
+	var r: Vector2i = tex_ref.get(global_index, Vector2i.ZERO)
+	if r.x != 0:
+		var fr := LGRes.frames(res.data(r.x))
+		if r.y < fr.size():
+			var img := _bitmap(fr[r.y], pal)
+			if img != null:
+				img.generate_mipmaps()
+				tex = ImageTexture.create_from_image(img)
+	tex_cache[key] = tex
+	return tex
+
+
+# LG bitmap (28-byte frame header, then pixels): type 2 = raw 8-bit, type 4 = run-length (RSD).
+# Color 0 is transparent.
+static func _bitmap(f: PackedByteArray, pal: PackedColorArray) -> Image:
+	if f.size() < 0x1c:
+		return null
+	var typ := f[4]
+	var w := f.decode_u16(8)
+	var h := f.decode_u16(10)
+	var row := f.decode_u16(12)
+	if w == 0 or h == 0:
+		return null
+	var idx := PackedByteArray()
+	idx.resize(w * h)
+	if typ == 2:
+		for y in h:
+			for x in w:
+				var p := 0x1c + y * row + x
+				idx[y * w + x] = f[p] if p < f.size() else 0
+	else:
+		var i := 0x1c
+		var o := 0
+		var n := w * h
+		while o < n and i < f.size():
+			var c := f[i]
+			i += 1
+			if c == 0:                          # short run
+				var cnt := f[i]
+				var v := f[i + 1]
+				i += 2
+				for k in cnt:
+					if o + k < n:
+						idx[o + k] = v
+				o += cnt
+			elif c < 0x80:                      # short literal
+				for k in c:
+					if o + k < n:
+						idx[o + k] = f[i + k]
+				i += c
+				o += c
+			elif c > 0x80:                      # short skip (transparent)
+				o += c & 0x7F
+			else:
+				var wv := f.decode_u16(i)
+				i += 2
+				if wv == 0:
+					break
+				if wv & 0x8000 == 0:
+					o += wv
+				elif wv & 0x4000 == 0:
+					var cnt2 := wv & 0x3FFF
+					for k in cnt2:
+						if o + k < n:
+							idx[o + k] = f[i + k]
+					i += cnt2
+					o += cnt2
+				else:
+					var cnt3 := wv & 0x3FFF
+					var v3 := f[i]
+					i += 1
+					for k in cnt3:
+						if o + k < n:
+							idx[o + k] = v3
+					o += cnt3
+	var rgba := PackedByteArray()
+	rgba.resize(w * h * 4)
+	for p in w * h:
+		var c: Color = pal[idx[p]]
+		rgba[4 * p] = int(c.r8)
+		rgba[4 * p + 1] = int(c.g8)
+		rgba[4 * p + 2] = int(c.b8)
+		rgba[4 * p + 3] = 0 if idx[p] == 0 else 255
+	return Image.create_from_data(w, h, false, Image.FORMAT_RGBA8, rgba)
+
+
+func _build(f: PackedByteArray, pal: PackedColorArray, pal_key: String) -> Dictionary:
+	if f.size() < 0x5e:
+		return {}
+	var d := Decoder.new()
+	d.f = f
+	var nvhots := f[0x47]
+	var ntex := f[0x49]
+	var code := f.decode_u32(0x4e)
+	var slots := {}                              # texture slot used by polygons -> global index
+	var o := 0x5e + 16 * nvhots
+	for i in ntex:
+		slots[f[o + 1]] = f.decode_u16(o + 2)
+		o += 10
+	d.run(code, Transform3D.IDENTITY, 0)
+	if d.polys.is_empty():
+		return {}
+	var mesh := ArrayMesh.new()
+	var groups := {}                             # slot (or -1 for flat colors) -> [poly]
+	for p in d.polys:
+		var s: int = p[2]
+		if not groups.has(s):
+			groups[s] = []
+		groups[s].append(p)
+	var top := 0.0
+	for s in groups:
+		var st := SurfaceTool.new()
+		st.begin(Mesh.PRIMITIVE_TRIANGLES)
+		for p in groups[s]:
+			var v: PackedVector3Array = p[0]
+			var uv: PackedVector2Array = p[1]
+			var col := Color.WHITE
+			if s < 0:
+				var ci: int = p[3]
+				col = pal[ci & 0xFF] if ci >= 0 else RUNTIME_COLOR
+			for k in range(1, v.size() - 1):
+				for j in [0, k, k + 1]:
+					if s >= 0:
+						st.set_uv(uv[j])
+					else:
+						st.set_color(col)
+					var q: Vector3 = v[j]
+					top = maxf(top, -q.y)
+					st.add_vertex(Vector3(q.z, -q.y, q.x))
+		st.generate_normals()
+		var mat := StandardMaterial3D.new()
+		mat.roughness = 1.0
+		mat.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
+		mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
+		if s < 0:
+			mat.vertex_color_use_as_albedo = true
+			mat.vertex_color_is_srgb = true
+		else:
+			var tex := _texture(slots.get(s, 0), pal, pal_key)
+			if tex != null:
+				mat.albedo_texture = tex
+				mat.alpha_scissor_threshold = 0.5
+				mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+			else:
+				mat.albedo_color = Color(0.6, 0.6, 0.6)
+		st.set_material(mat)
+		st.commit(mesh)
+	if not d.lines.is_empty():                   # wireframe polygons (lattice towers)
+		var sl := SurfaceTool.new()
+		sl.begin(Mesh.PRIMITIVE_LINES)
+		for seg in d.lines:
+			var a: Vector3 = seg[0]
+			var b: Vector3 = seg[1]
+			sl.set_color(pal[int(seg[2]) & 0xFF])
+			sl.add_vertex(Vector3(a.z, -a.y, a.x))
+			sl.set_color(pal[int(seg[2]) & 0xFF])
+			sl.add_vertex(Vector3(b.z, -b.y, b.x))
+		var lm := StandardMaterial3D.new()
+		lm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		lm.vertex_color_use_as_albedo = true
+		lm.vertex_color_is_srgb = true
+		sl.set_material(lm)
+		sl.commit(mesh)
+	return {"mesh": mesh, "name": LGRes.text(f.slice(0, 8)), "height": top}
+
+
+# Walks the bytecode like the game's interpreter, but draws every polygon (no back-face jumps)
+# and leaves articulated parts (turrets, gun barrels) at their rest angle.
+class Decoder:
+	var f: PackedByteArray
+	var pts := {}           # point index -> position (model space, y down)
+	var uv := {}            # point index -> Vector2
+	var polys := []         # [PackedVector3Array, PackedVector2Array, texture slot or -1, color]
+	var lines := []         # [a, b, color]
+	var color := 0
+
+	func v3(o: int) -> Vector3:
+		return Vector3(f.decode_s32(o), f.decode_s32(o + 4), f.decode_s32(o + 8)) / 65536.0
+
+	func fx(o: int) -> float:
+		return f.decode_s32(o) / 65536.0
+
+	func pt(i: int) -> Vector3:
+		return pts.get(i, Vector3.ZERO)
+
+	func add_poly(idx: Array, uvs: PackedVector2Array, slot: int, col: int) -> void:
+		var v := PackedVector3Array()
+		for i in idx:
+			v.append(pt(i))
+		if v.size() >= 3:
+			polys.append([v, uvs, slot, col])
+
+	func run(pc: int, xf: Transform3D, depth: int) -> void:
+		if depth > 24:
+			return
+		var steps := 0
+		while pc >= 0 and pc + 2 <= f.size() and steps < 200000:
+			steps += 1
+			var op := f.decode_u16(pc)
+			match op:
+				0x00:
+					return
+				0x01, 0x32, 0x2d:                  # normal tests / lighting: fall through
+					pc += 0x1c
+				0x02:
+					pc += 6
+				0x03:                              # n points from index start
+					var n := f.decode_u16(pc + 2)
+					var start := f.decode_u16(pc + 4)
+					for i in n:
+						pts[start + i] = xf * v3(pc + 6 + 12 * i)
+					pc += 6 + 12 * n
+				0x04:                              # flat polygon, current color
+					var n4 := f.decode_u16(pc + 2)
+					var idx4 := []
+					for i in n4:
+						idx4.append(f.decode_u16(pc + 4 + 2 * i))
+					add_poly(idx4, PackedVector2Array(), -1, color)
+					pc += 4 + 2 * n4
+				0x05:
+					color = f.decode_u16(pc + 2)
+					pc += 4
+				0x06:                              # BSP node: both sides, then continue
+					var a := f.decode_s32(pc + 0x1a)
+					var b := f.decode_s32(pc + 0x1e)
+					run(pc + a, xf, depth + 1)
+					run(pc + b, xf, depth + 1)
+					pc += 0x22
+				0x07, 0x2e, 0x2f:
+					pc += 2
+				0x08:
+					pc += 4 + 4 * f.decode_u16(pc + 2)
+				0x09, 0x19, 0x1a, 0x1e:
+					pc += 4
+				0x1b, 0x1f:
+					color = -1
+					pc += 4
+				0x1c, 0x20:
+					color = -1
+					pc += 6
+				0x0a, 0x0b, 0x0c:                  # point = other point + offset on one axis
+					var d := Vector3.ZERO
+					d[op - 0x0a] = fx(pc + 6)
+					pts[f.decode_u16(pc + 2)] = pt(f.decode_u16(pc + 4)) + xf.basis * d
+					pc += 0xa
+				0x0d, 0x0e, 0x0f:                  # ... offset on two axes (xy, xz, yz)
+					var ax: Array = [[0, 1], [0, 2], [1, 2]][op - 0x0d]
+					var d2 := Vector3.ZERO
+					d2[ax[0]] = fx(pc + 6)
+					d2[ax[1]] = fx(pc + 10)
+					pts[f.decode_u16(pc + 2)] = pt(f.decode_u16(pc + 4)) + xf.basis * d2
+					pc += 0xe
+				0x10, 0x11, 0x12:                  # articulated part (pitch / bank / heading)
+					var target := f.decode_u32(pc + 2)
+					var t2 := Transform3D(xf.basis, xf * v3(pc + 6))
+					run(target, t2, depth + 1)
+					pc += 0x14
+				0x14:                              # subroutine
+					run(pc + f.decode_s16(pc + 2), xf, depth + 1)
+					pc += 4
+				0x15:
+					pts[f.decode_u16(pc + 2)] = xf * v3(pc + 4)
+					pc += 0x10
+				0x16:
+					pts[f.decode_u16(pc + 2)] = xf * v3(pc + 4)
+					pc += 0x12
+				0x1d:                              # per-point texture coordinates, 8.8
+					var n1d := f.decode_u16(pc + 2)
+					for i in n1d:
+						var e := pc + 4 + 10 * i
+						uv[f.decode_u16(e)] = Vector2(f.decode_u16(e + 2), f.decode_u16(e + 4)) / 256.0
+					pc += 4 + 10 * n1d
+				0x21:                              # scaled points (scale = run-time parameter)
+					var n21 := f.decode_u16(pc + 2)
+					var s21 := f.decode_u16(pc + 6)
+					for i in n21:
+						pts[s21 + i] = xf * v3(pc + 8 + 12 * i)
+					pc += 8 + 12 * n21
+				0x22, 0x23:
+					pc += 6
+				0x24:
+					uv[f.decode_u16(pc + 2)] = Vector2(fx(pc + 4), fx(pc + 8))
+					pc += 0xc
+				0x25:
+					var n25 := f.decode_u16(pc + 2)
+					for i in n25:
+						var e2 := pc + 4 + 10 * i
+						uv[f.decode_u16(e2)] = Vector2(fx(e2 + 2), fx(e2 + 6))
+					pc += 4 + 10 * n25
+				0x26:                              # textured polygon, coordinates set before
+					var slot := f.decode_u16(pc + 2)
+					var n26 := f.decode_u16(pc + 4)
+					var idx26 := []
+					var uv26 := PackedVector2Array()
+					for i in n26:
+						var pn := f.decode_u16(pc + 6 + 2 * i)
+						idx26.append(pn)
+						uv26.append(uv.get(pn, Vector2.ZERO))
+					add_poly(idx26, uv26, slot, 0)
+					pc += 6 + 2 * n26
+				0x27:
+					pc += 8
+				0x28, 0x29:                        # part with its own matrix: rest of the program
+					var bs := Basis(Vector3(fx(pc + 0x10), fx(pc + 0x1c), fx(pc + 0x28)),
+							Vector3(fx(pc + 0x14), fx(pc + 0x20), fx(pc + 0x2c)),
+							Vector3(fx(pc + 0x18), fx(pc + 0x24), fx(pc + 0x30)))
+					if bs.determinant() == 0.0:
+						bs = Basis.IDENTITY
+					run(pc + 0x34, Transform3D(xf.basis * bs, xf * v3(pc + 4)), depth + 1)
+					return
+				0x2a, 0x2c:
+					pc += 0x10
+				0x2b:
+					pc += 4 + 2 * f.decode_u16(pc + 2)
+				0x30, 0x31:
+					pc += 3
+				0x33:                              # polygon with its normal: flat / wire / textured
+					var skip := f.decode_s16(pc + 2)
+					var sub := f.decode_u16(pc + 0x1c)
+					var n33 := f.decode_u16(pc + 0x1e)
+					var idx33 := []
+					for i in n33:
+						idx33.append(f.decode_u16(pc + 0x20 + 2 * i))
+					var last := f.decode_u16(pc + 0x20 + 2 * n33)
+					var col := (last & 0xFFF) if last & 0x8000 else -1
+					if sub == 2:
+						var uv33 := PackedVector2Array()
+						for k in n33:
+							var e3 := pc + 0x22 + 2 * n33 + 8 * k
+							uv33.append(Vector2(fx(e3), fx(e3 + 4)))
+						add_poly(idx33, uv33, last, 0)
+					elif sub == 1:
+						for k in n33:
+							lines.append([pt(idx33[k]), pt(idx33[(k + 1) % n33]), maxi(col, 0)])
+					else:
+						add_poly(idx33, PackedVector2Array(), -1, col)
+					if skip <= 0:
+						return
+					pc += skip
+				0x34:                              # vertex normals for shading, 0xFFFF-terminated
+					pc += 2
+					while pc + 2 <= f.size() and f.decode_u16(pc) != 0xFFFF:
+						pc += 0x1a
+					pc += 0x1a
+				_:
+					push_warning("TN model: unknown opcode %x at %x" % [op, pc])
+					return

@@ -67,6 +67,11 @@ func _ready() -> void:
 	objects_ok = objects.setup(data.data_dir())
 	_fill_list()
 	var args := OS.get_cmdline_user_args()
+	if "--clean" in args:                     # screenshots: no labels, zones, panel or help line
+		labels_on = false
+		zones_on = false
+		panel.visible = false
+		status.visible = false
 	if "--all" in args:                       # test: load every mission, then quit
 		for k in missions.size():
 			await _load(k)

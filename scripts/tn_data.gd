@@ -143,6 +143,7 @@ func load_mission(path: String) -> Dictionary:
 		var g := f[7]
 		ents.append({"cls": f[0], "sub": f[1], "group": groups[g] if g < groups.size() else "",
 				"x": f.decode_s32(8) / 65536.0, "y": f.decode_s32(12) / 65536.0,
+				"z": f.decode_s32(16) / 65536.0,     # height above the ground (only the Nid d'aigle bridge)
 				"heading": f.decode_u16(20) / 65536.0 * TAU})
 	return {"map": LGRes.text(r.data(170)), "groups": groups, "zones": zones, "entities": ents}
 

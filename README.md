@@ -66,7 +66,7 @@ Lancement : double-clic sur `Lancer le visualiseur.bat` (Godot est dans `C:\Tool
 | RESTNOBJ 1364 + classe | propriétés par type : forme de collision (u16 genre, u16 index de l'entrée rayon / hauteur, entrées de 8 o) |
 | RESMAP.RES 1440 | n° de texture global → réf. (ressource, image) |
 | RESGAME / casques | couleurs 0-16 de la palette (fixes) ; la planète fournit 17-255 |
-| MISSx.RES 170 / 172 / 173 / 176 / 177 | carte / groupes / entités (50 o, 16.16) / coordonnées des zones / noms des zones |
+| MISSx.RES 170 / 172 / 173 / 176 / 177 | carte / groupes / entités (50 o : classe, type, … x, y, z en 16.16 à 8 / 12 / 16, cap u16 à 20 ; z = hauteur au-dessus du sol, 0 partout sauf le pont de Nid d'aigle) / coordonnées des zones / noms des zones |
 
 Carreau d'un point : `octet & 0x3F`. Le bit 7 (~57 % des points) n'est pas une orientation (le bit 6 n'est
 jamais à 1) : l'orientation n'est pas stockée, elle se déduit des matières des 8 cases voisines

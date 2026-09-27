@@ -248,7 +248,7 @@ func _load(index: int) -> void:
 	var nveg := _add_vegetation(m)
 	var counts := {}
 	for e in mis["entities"]:
-		_add_object(m, e["cls"], e["sub"], e["x"], e["y"], e["heading"], e["group"], true)
+		_add_object(m, e["cls"], e["sub"], e["x"], e["y"], e["heading"], e["group"], true, e["z"])
 		counts[e["cls"]] = counts.get(e["cls"], 0) + 1
 	for z in mis["zones"]:
 		_add_zone(m, z)
@@ -476,13 +476,15 @@ func _ground_mat(pl: Dictionary, grid: Dictionary, origin: Vector2, step: float)
 
 
 func _add_object(m: Dictionary, cls: int, sub: int, x: float, y: float, heading: float, group: String,
-		label: bool) -> void:
+		label: bool, z: float = 0.0) -> void:
 	var name: String = data.type_name(cls, sub)
 	var low := name.to_lower()
 	var ground := TNData.height_at(m, x, y)
-	# the mission files store no altitude (always 0): ships sit on the ground / dock,
-	# only probes are shown hovering a little
-	var lift := 3.0 if cls == 3 and (low.contains("sonde") or low.contains("probe")) else 0.0
+	# z = height above the ground; the mission files leave it at 0 except for the Nid d'aigle bridge
+	# (spanning a ravine): ships then sit on the ground / dock, probes are shown hovering a little
+	var lift := z
+	if z == 0.0 and cls == 3 and (low.contains("sonde") or low.contains("probe")):
+		lift = 3.0
 	var mi := MeshInstance3D.new()
 	var top := 0.0
 	var ref: Vector2i = objects.ref_for(cls, sub) if objects_ok else Vector2i.ZERO

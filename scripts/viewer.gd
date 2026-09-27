@@ -136,7 +136,7 @@ func _build_ui() -> void:
 	status.anchor_bottom = 1.0
 	status.offset_left = 10
 	status.offset_top = -34
-	status.text = "Right mouse: look   WASD/ZQSD: move   Space/Ctrl: up/down   Shift: fast   Wheel: speed   Tab: panel   F2: labels   F3: zones"
+	status.text = "Right mouse: look   WASD/ZQSD: move   Space/Ctrl: up/down   Shift: fast   Wheel: speed   Tab: panel   F2: labels   F3: script zones (yellow posts)"
 	ui.add_child(status)
 
 
@@ -325,26 +325,28 @@ func _add_object(m: Dictionary, cls: int, sub: int, x: float, y: float, heading:
 
 
 func _add_zone(m: Dictionary, z: Dictionary) -> void:
+	# script zone (waypoint, trigger, drop / pickup point): thin post, name at eye level
 	var ground := TNData.height_at(m, z["x"], z["y"])
 	var cyl := CylinderMesh.new()
-	cyl.top_radius = 0.15
-	cyl.bottom_radius = 0.15
-	cyl.height = 14.0
+	cyl.top_radius = 0.07
+	cyl.bottom_radius = 0.07
+	cyl.height = 6.0
 	var mi := MeshInstance3D.new()
 	mi.mesh = cyl
 	mi.material_override = mats["zone"]
-	mi.position = Vector3(z["x"], ground + 7.0, z["y"])
+	mi.position = Vector3(z["x"], ground + 3.0, z["y"])
 	mi.add_to_group("zones")
 	mi.visible = zones_on
 	var l := Label3D.new()
 	l.text = z["name"]
 	l.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	l.font_size = 40
-	l.pixel_size = 0.03
+	l.pixel_size = 0.018
 	l.modulate = Color(1.0, 0.9, 0.3)
 	l.outline_size = 12
-	l.visibility_range_end = 400.0
-	l.position = Vector3(0, 8.0, 0)
+	l.visibility_range_end = 300.0
+	l.fixed_size = false
+	l.position = Vector3(0, 3.6, 0)
 	mi.add_child(l)
 	world.add_child(mi)
 

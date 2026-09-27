@@ -64,6 +64,83 @@ func sprite_width(cls: int, sub: int) -> float:
 	return 1.0 / 6.0
 
 
+# ------------------------------------------------------------------ soldiers
+# Power suits (class 1) are skeletons whose segments are drawn as limb sprites stretched between
+# two joints. Suit s uses RESTNOBJ 800 + 7 s + part (0 foot, 1 shin, 2 thigh, 3 upper arm,
+# 4 forearm, 5 torso, 6 other forearm); a part holds 16 views of the limb seen from all around
+# (torso: 9, back to front) and every view marks where the two joints are. Skeletons: 884 (most
+# suits), 885 (clones, pirates), 886 (biped mech, whose parts are 3D models).
+# Soldier type -> suit: table at 0x395CA5 in __FF.EXE (one byte every 70).
+const SUIT_OF_TYPE := [0, 1, 2, 4, 3, 5, 6, 7, 8, 11, 9, 10, 5, 1, 0, 1, 2, 9]
+const MECH_SUIT := 11
+const MECH_PARTS := Vector2i(877, 883)     # its legs and body: 3D models
+
+
+static func suit_of(sub: int) -> int:
+	return SUIT_OF_TYPE[sub % SUIT_OF_TYPE.size()]
+
+
+# Segments of a suit's skeleton: [joint a, joint b, part]; the part's first view marker is joint a.
+func skeleton(suit: int) -> Array:
+	var rid := 886 if suit == MECH_SUIT else (885 if suit in [6, 7, 9] else 884)
+	var d: PackedByteArray = res.data(rid)
+	var out := []
+	if d.size() < 4:
+		return out
+	for k in d[1]:
+		var o := 0x14 + 16 * k
+		if o + 6 <= d.size():
+			out.append([d[o], d[o + 1], d.decode_u16(o + 4)])
+	return out
+
+
+# One limb: its views in a texture array, every view placed so that joint a sits at the same
+# spot (x centered, y = "a1"), plus the pixel length between the two joints. {} for 3D parts.
+func limb(suit: int, part: int, pal: PackedColorArray, pal_key: String) -> Dictionary:
+	var key := "l%d/%d/%s" % [suit, part, pal_key]
+	if tex_cache.has(key):
+		return tex_cache[key]
+	var out := {}
+	var fr := LGRes.frames(res.data(800 + 7 * suit + part))
+	if not fr.is_empty() and fr[0].size() > 13:
+		var f: PackedByteArray = fr[0]
+		var n := f[0]
+		var views := []
+		var half_w := 0
+		var top := 0
+		var bottom := 0
+		for v in n:
+			var o := f.decode_u32(13 + 4 * v)
+			if o + 0x1c > f.size() or not (f[o + 4] == 2 or f[o + 4] == 4):
+				views.clear()
+				break
+			var img := _bitmap(f.slice(o), pal)
+			if img == null:
+				views.clear()
+				break
+			var ax := f[o + 16]
+			var ay := f[o + 17]
+			views.append([img, ax, ay])
+			half_w = maxi(half_w, maxi(ax, img.get_width() - ax))
+			top = maxi(top, ay)
+			bottom = maxi(bottom, img.get_height() - ay)
+		if not views.is_empty():
+			var w := 2 * half_w + 2
+			var h := top + bottom
+			var images: Array[Image] = []
+			for vw in views:
+				var src: Image = vw[0]
+				var canvas := Image.create(w, h, false, Image.FORMAT_RGBA8)
+				canvas.blit_rect(src, Rect2i(Vector2i.ZERO, src.get_size()), Vector2i(w / 2 - vw[1], top - vw[2]))
+				canvas.generate_mipmaps()
+				images.append(canvas)
+			var arr := Texture2DArray.new()
+			arr.create_from_images(images)
+			out = {"tex": arr, "views": n, "size": Vector2(w, h), "a1": float(top), "len": float(f.decode_u32(9))}
+	tex_cache[key] = out
+	return out
+
+
 func ref_for(cls: int, sub: int) -> Vector2i:
 	var arr: Array = refs.get(cls, [])
 	return arr[sub] if sub < arr.size() else Vector2i.ZERO
@@ -106,7 +183,7 @@ func model(ref: Vector2i, pal: PackedColorArray, pal_key: String) -> Dictionary:
 	if model_cache.has(key):
 		return model_cache[key]
 	var out := {}
-	if is_model(ref):
+	if is_model(ref) or (ref.x >= MECH_PARTS.x and ref.x <= MECH_PARTS.y):
 		var fr := LGRes.frames(res.data(ref.x))
 		if ref.y < fr.size():
 			out = _build(fr[ref.y], pal, pal_key)
@@ -321,12 +398,25 @@ class Decoder:
 	func pt(i: int) -> Vector3:
 		return pts.get(i, Vector3.ZERO)
 
-	func add_poly(idx: Array, uvs: PackedVector2Array, slot: int, col: int) -> void:
+	# nrm: the polygon's stored normal, when it has one. The game decides visibility with it, not
+	# with the vertex order, so mirrored parts (the mech's left foot) can be wound backwards: put
+	# them back in the order the rest of the data uses (clockwise seen from outside).
+	func add_poly(idx: Array, uvs: PackedVector2Array, slot: int, col: int, nrm := Vector3.ZERO) -> void:
 		var v := PackedVector3Array()
 		for i in idx:
 			v.append(pt(i))
-		if v.size() >= 3:
-			polys.append([v, uvs, slot, col])
+		if v.size() < 3:
+			return
+		if nrm != Vector3.ZERO:
+			var nw := Vector3.ZERO                 # Newell normal of the vertex order
+			for k in v.size():
+				var a := v[k]
+				var b := v[(k + 1) % v.size()]
+				nw += Vector3((a.y - b.y) * (a.z + b.z), (a.z - b.z) * (a.x + b.x), (a.x - b.x) * (a.y + b.y))
+			if nw.dot(nrm) > 0.0:
+				v.reverse()
+				uvs.reverse()
+		polys.append([v, uvs, slot, col])
 
 	func run(pc: int, xf: Transform3D, depth: int) -> void:
 		if depth > 24:
@@ -461,17 +551,18 @@ class Decoder:
 						idx33.append(f.decode_u16(pc + 0x20 + 2 * i))
 					var last := f.decode_u16(pc + 0x20 + 2 * n33)
 					var col := (last & 0xFFF) if last & 0x8000 else -1
+					var nrm := xf.basis * v3(pc + 4)
 					if sub == 2:
 						var uv33 := PackedVector2Array()
 						for k in n33:
 							var e3 := pc + 0x22 + 2 * n33 + 8 * k
 							uv33.append(Vector2(fx(e3), fx(e3 + 4)))
-						add_poly(idx33, uv33, last, 0)
+						add_poly(idx33, uv33, last, 0, nrm)
 					elif sub == 1:
 						for k in n33:
 							lines.append([pt(idx33[k]), pt(idx33[(k + 1) % n33]), maxi(col, 0)])
 					else:
-						add_poly(idx33, PackedVector2Array(), -1, col)
+						add_poly(idx33, PackedVector2Array(), -1, col, nrm)
 					if skip <= 0:
 						return
 					pc += skip

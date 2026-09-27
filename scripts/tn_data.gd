@@ -201,12 +201,14 @@ func _grid(d: PackedByteArray, n: int, pl: Dictionary) -> Dictionary:
 	return grid
 
 
-# Transition tiles (sand/water edge, road diagonal...) are stored without orientation: like the
-# engine, turn each one so that its sides match the materials of the 8 neighbouring cells.
+# Transition tiles (sand/water edge, road diagonal...) and one-sided tiles of a single material
+# (road edge triangle, hazard-striped pad border) are stored without orientation: like the engine,
+# turn each one so that its sides match the materials of the 8 neighbouring cells.
 func _tilemap(tiles: PackedByteArray, n: int, pl: Dictionary) -> Image:
 	var mat: PackedByteArray = pl["mat"]
 	var pair: Dictionary = pl["pair"]
 	var prof: Dictionary = pl["prof"]
+	var own: Dictionary = pl["own"]
 	var out := PackedByteArray()
 	out.resize(n * n * 2)
 	var nb := [Vector2i(0, -1), Vector2i(1, -1), Vector2i(1, 0), Vector2i(1, 1), Vector2i(0, 1),
@@ -218,18 +220,34 @@ func _tilemap(tiles: PackedByteArray, n: int, pl: Dictionary) -> Image:
 			var i := y * n + x
 			var t := tiles[i]
 			out[2 * i] = t
-			if not pair.has(t):
+			if pair.has(t):
+				var ab: Vector2i = pair[t]
+				for k in 8:
+					var xx := clampi(x + nb[k].x, 0, n - 1)
+					var yy := clampi(y + nb[k].y, 0, n - 1)
+					var tt := tiles[yy * n + xx]
+					if pair.has(tt):
+						obs[k] = 0.5
+					else:
+						var m := mat[tt]
+						obs[k] = 1.0 if m == ab.x else (0.0 if m == ab.y else 0.5)
+			elif own.has(t):
+				# its own-material part faces the cells of the same material
+				var mo: int = own[t]
+				var lowest := 1.0
+				for k in 8:
+					var xx := clampi(x + nb[k].x, 0, n - 1)
+					var yy := clampi(y + nb[k].y, 0, n - 1)
+					var tt := tiles[yy * n + xx]
+					if mat[tt] != mo:
+						obs[k] = 0.0
+					else:
+						obs[k] = 0.75 if own.has(tt) else 1.0
+					lowest = minf(lowest, obs[k])
+				if lowest > 0.5:
+					continue              # inside its own material: nothing to line up with
+			else:
 				continue
-			var ab: Vector2i = pair[t]
-			for k in 8:
-				var xx := clampi(x + nb[k].x, 0, n - 1)
-				var yy := clampi(y + nb[k].y, 0, n - 1)
-				var tt := tiles[yy * n + xx]
-				if pair.has(tt):
-					obs[k] = 0.5
-				else:
-					var m := mat[tt]
-					obs[k] = 1.0 if m == ab.x else (0.0 if m == ab.y else 0.5)
 			var best := 0
 			var best_err := INF
 			var rots: Array = prof[t]
@@ -286,10 +304,12 @@ func _read_planet(path: String) -> Dictionary:
 	tile_color.resize(64)
 	tile_color.fill(Color(0.45, 0.5, 0.35))
 	var rgb_tiles := []
+	var tile_spread := PackedFloat32Array()     # color spread of each tile (low = plain texture)
 	for t in count:
 		var rgb := PackedByteArray()
 		rgb.resize(64 * 64 * 3)
 		var acc := Vector3.ZERO
+		var acc2 := Vector3.ZERO
 		for p in 4096:
 			var idx := raw[t * 4096 + p] - 17
 			var c := Vector3.ZERO
@@ -299,7 +319,12 @@ func _read_planet(path: String) -> Dictionary:
 			rgb[3 * p + 1] = int(c.y)
 			rgb[3 * p + 2] = int(c.z)
 			acc += c
-		acc /= 4096.0 * 255.0
+			acc2 += c * c
+		acc /= 4096.0
+		acc2 /= 4096.0
+		var sd := acc2 - acc * acc
+		tile_spread.append(sqrt(maxf(sd.x, 0.0)) + sqrt(maxf(sd.y, 0.0)) + sqrt(maxf(sd.z, 0.0)))
+		acc /= 255.0
 		tile_color[t] = Color(acc.x, acc.y, acc.z)
 		rgb_tiles.append(rgb)
 		var img := Image.create_from_data(64, 64, false, Image.FORMAT_RGB8, rgb)
@@ -327,6 +352,26 @@ func _read_planet(path: String) -> Dictionary:
 			pair.erase(t)
 			continue
 		prof[t] = _profiles(rgb_tiles[t], mat_color[ab.x], mat_color[ab.y])
+	# one-sided tiles: their four border bands clearly differ. Their own-material part is told
+	# apart from the rest with the plainest tile of that material (the first tile can be striped).
+	var own := {}
+	var plain := {}                          # material -> [spread, color]
+	var one_sided := {}
+	for t in count:
+		if not pair.has(t) and _one_sided(rgb_tiles[t]):
+			one_sided[t] = true
+	for t in count:
+		if pair.has(t) or one_sided.has(t):
+			continue
+		var m := mat[t]
+		if not plain.has(m) or tile_spread[t] < plain[m][0]:
+			plain[m] = [tile_spread[t], tile_color[t]]
+	for t in one_sided:
+		var m := mat[t]
+		if plain.has(m):
+			var c_own: Color = plain[m][1]
+			prof[t] = _profiles(rgb_tiles[t], c_own, _far_color(rgb_tiles[t], c_own))
+			own[t] = m
 	out["ok"] = true
 	out["palette"] = full_palette(pal)
 	out["count"] = count
@@ -335,7 +380,46 @@ func _read_planet(path: String) -> Dictionary:
 	out["mat"] = mat
 	out["pair"] = pair
 	out["prof"] = prof
+	out["own"] = own
 	return out
+
+
+# True when the mean colors of the tile's four 4-pixel border bands are far apart.
+static func _one_sided(rgb: PackedByteArray) -> bool:
+	var bands: Array[Vector3] = [Vector3.ZERO, Vector3.ZERO, Vector3.ZERO, Vector3.ZERO]
+	for a in 64:
+		for b in 4:
+			var pn := (b * 64 + a) * 3                # top
+			var pe := (a * 64 + 63 - b) * 3           # right
+			var ps := ((63 - b) * 64 + a) * 3         # bottom
+			var pw := (a * 64 + b) * 3                # left
+			bands[0] += Vector3(rgb[pn], rgb[pn + 1], rgb[pn + 2])
+			bands[1] += Vector3(rgb[pe], rgb[pe + 1], rgb[pe + 2])
+			bands[2] += Vector3(rgb[ps], rgb[ps + 1], rgb[ps + 2])
+			bands[3] += Vector3(rgb[pw], rgb[pw + 1], rgb[pw + 2])
+	for i in 4:
+		for j in range(i + 1, 4):
+			if (bands[i] - bands[j]).length() / 256.0 > 30.0:
+				return true
+	return false
+
+
+# Mean color of the 30 % of pixels (16x16 subsample) least like the given color.
+static func _far_color(rgb: PackedByteArray, c_own: Color) -> Color:
+	var o := Vector3(c_own.r, c_own.g, c_own.b)
+	var d := []
+	for y in 16:
+		for x in 16:
+			var p := (y * 4 * 64 + x * 4) * 3
+			var c := Vector3(rgb[p], rgb[p + 1], rgb[p + 2]) / 255.0
+			d.append([c.distance_squared_to(o), c])
+	d.sort_custom(func(a, b): return a[0] > b[0])
+	var acc := Vector3.ZERO
+	var k := int(256 * 0.3)
+	for i in k:
+		acc += d[i][1]
+	acc /= k
+	return Color(acc.x, acc.y, acc.z)
 
 
 # For a transition tile: share of material A on its 8 border regions (N NE E SE S SW W NW),

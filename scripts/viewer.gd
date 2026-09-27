@@ -5,6 +5,8 @@ const TNData = preload("res://scripts/tn_data.gd")
 const Terrain = preload("res://scripts/terrain.gd")
 const TNObjects = preload("res://scripts/tn_objects.gd")
 const GROUND = preload("res://terrain.gdshader")
+const LIMB = preload("res://limb.gdshader")
+const SOLDIER_PX := 1.0 / 280.0      # world units per limb sprite pixel (suits ~0.45 tall)
 const CFG := "user://viewer.cfg"
 
 var data = TNData.new()
@@ -470,7 +472,14 @@ func _add_object(m: Dictionary, cls: int, sub: int, x: float, y: float, heading:
 	var mi := MeshInstance3D.new()
 	var top := 0.0
 	var ref: Vector2i = objects.ref_for(cls, sub) if objects_ok else Vector2i.ZERO
-	if TNObjects.is_model(ref):
+	var soldier := false
+	if cls == 1 and objects_ok:
+		var suit := TNObjects.suit_of(sub)
+		top = _add_mech(mi) if suit == TNObjects.MECH_SUIT else _add_soldier(mi, suit)   # parts = children
+		soldier = top > 0.0
+	if soldier:
+		pass
+	elif TNObjects.is_model(ref):
 		var md: Dictionary = objects.model(ref, pal, pal_key)
 		if not md.is_empty():
 			mi.mesh = md["mesh"]
@@ -482,7 +491,7 @@ func _add_object(m: Dictionary, cls: int, sub: int, x: float, y: float, heading:
 			mi.mesh = q
 			mi.material_override = _sprite_mat(ref, sp)
 			top = q.size.y
-	if mi.mesh == null:                 # nothing in the data (soldiers are animated sprites)
+	if mi.mesh == null and not soldier:   # nothing usable in the data (e.g. the biped mech)
 		var box := BoxMesh.new()
 		match cls:
 			0:
@@ -516,6 +525,132 @@ func _add_object(m: Dictionary, cls: int, sub: int, x: float, y: float, heading:
 		l.add_to_group("labels")
 		l.visible = labels_on
 		mi.add_child(l)
+
+
+# Power suit in a standing rest pose (the game animates suits procedurally: no stored poses),
+# built from the lengths of its limb sprites. Joints of skeletons 884 / 885: 0/1 toes, 2/3 ankles,
+# 4/5 knees, 6/7 hips, 8 pelvis, 9 neck, 10/11 shoulders, 12/13 elbows, 14/15 hands.
+# Returns the suit height (0 when the suit has no sprites).
+func _add_soldier(holder: Node3D, suit: int) -> float:
+	var segs: Array = objects.skeleton(suit)
+	var limbs := {}
+	for sg in segs:
+		var ld: Dictionary = objects.limb(suit, sg[2], pal, pal_key)
+		if ld.is_empty():
+			return 0.0
+		limbs[sg[2]] = ld
+	var ln := func(part: int) -> float: return limbs[part]["len"] if limbs.has(part) else 20.0
+	var p: Array[Vector3] = []                     # (right, up, forward) in sprite pixels
+	p.resize(16)
+	var ankle := 5.0
+	var hip_y: float = ankle + ln.call(1) + ln.call(2)
+	var neck_y: float = hip_y + ln.call(5)
+	for i in 2:
+		var side := -1.0 if i == 0 else 1.0
+		p[i] = Vector3(side * 7.0, 0.0, sqrt(maxf(ln.call(0) ** 2 - ankle * ankle, 1.0)))
+		p[2 + i] = Vector3(side * 7.0, ankle, 0.0)
+		p[4 + i] = Vector3(side * 7.0, ankle + ln.call(1), 0.0)
+		p[6 + i] = Vector3(side * 7.0, hip_y, 0.0)
+		p[10 + i] = Vector3(side * 20.0, neck_y - 4.0, 0.0)
+		p[12 + i] = p[10 + i] + Vector3(side * 2.0, -ln.call(3), 0.0)
+		p[14 + i] = p[12 + i] + Vector3(side * 1.0, -ln.call(4) * 0.97, ln.call(4) * 0.25)
+	p[8] = Vector3(0.0, hip_y, 0.0)
+	p[9] = Vector3(0.0, neck_y, 0.0)
+	var top := 0.0
+	for sg in segs:
+		var ld: Dictionary = limbs[sg[2]]
+		var a: Vector3 = p[sg[0]]
+		var b: Vector3 = p[sg[1]]
+		# (right, up, forward) -> node axes (forward = +X, right = +Z)
+		var ga := Vector3(a.z, a.y, a.x) * SOLDIER_PX
+		var gb := Vector3(b.z, b.y, b.x) * SOLDIER_PX
+		var dir := gb - ga
+		var sc: float = dir.length() / ld["len"]
+		var yn := dir.normalized()
+		var fw := Vector3(1, 0, 0)
+		if absf(fw.dot(yn)) > 0.95:
+			fw = Vector3(0, 1, 0)
+		var xn := (fw - yn * fw.dot(yn)).normalized()
+		var zn := xn.cross(yn)
+		var seg := MeshInstance3D.new()
+		seg.mesh = _limb_quad(ld)
+		seg.material_override = _limb_mat(suit, sg[2], ld)
+		seg.transform = Transform3D(Basis(xn * sc, yn * sc, zn * sc), ga)
+		seg.extra_cull_margin = ld["size"].x * sc
+		seg.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		holder.add_child(seg)
+		top = maxf(top, maxf(ga.y, gb.y))
+	return top + 0.1
+
+
+# Biped mech (skeleton 886): legs and body are small 3D models (RESTNOBJ 877-883, "pbmb00-06"),
+# each hanging from its first joint with its y axis along the segment. Rest pose in world units.
+# Joints: 0/1 toes, 2/3 ankles, 4/5 knees, 6/7 hips, 8 body bottom, 9 body top.
+func _add_mech(holder: Node3D) -> float:
+	var segs: Array = objects.skeleton(TNObjects.MECH_SUIT)
+	var p: Array[Vector3] = []                     # (right, up, forward)
+	p.resize(16)
+	var ankle := 0.1
+	var knee_y := ankle + 0.39
+	var hip_y := knee_y + 0.28
+	for i in 2:
+		var side := -1.0 if i == 0 else 1.0
+		p[i] = Vector3(side * 0.3, 0.0, 0.24)
+		p[2 + i] = Vector3(side * 0.3, ankle, 0.0)
+		p[4 + i] = Vector3(side * 0.3, knee_y, 0.04)
+		p[6 + i] = Vector3(side * 0.3, hip_y, 0.0)
+	p[9] = Vector3(0.0, hip_y + 0.3, 0.0)
+	p[8] = Vector3(0.0, hip_y - 0.08, 0.0)
+	var top := 0.0
+	for sg in segs:
+		var md: Dictionary = objects.model(Vector2i(877 + sg[2], 0), pal, pal_key)
+		if md.is_empty():
+			return 0.0
+		var a: Vector3 = p[sg[0]]
+		var b: Vector3 = p[sg[1]]
+		var ga := Vector3(a.z, a.y, a.x)
+		var gb := Vector3(b.z, b.y, b.x)
+		var down := (gb - ga).normalized()          # model y (mesh -Y) runs from joint a to b
+		var yn := -down
+		var fw := Vector3(1, 0, 0)
+		if absf(fw.dot(yn)) > 0.95:
+			fw = Vector3(0, 1, 0)
+		var xn := (fw - yn * fw.dot(yn)).normalized()
+		var part := MeshInstance3D.new()
+		part.mesh = md["mesh"]
+		part.transform = Transform3D(Basis(xn, yn, xn.cross(yn)), ga)
+		holder.add_child(part)
+		top = maxf(top, maxf(ga.y, gb.y))
+	return top + 0.1
+
+
+func _limb_quad(ld: Dictionary) -> ArrayMesh:
+	if ld.has("mesh"):
+		return ld["mesh"]
+	var w: float = ld["size"].x
+	var h: float = ld["size"].y
+	var a1: float = ld["a1"]
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var corners := [Vector2(0, 0), Vector2(1, 0), Vector2(1, 1), Vector2(0, 0), Vector2(1, 1), Vector2(0, 1)]
+	for c in corners:
+		st.set_uv(c)
+		st.add_vertex(Vector3((c.x - 0.5) * w, c.y * h - a1, 0.0))
+	var mesh := st.commit()
+	ld["mesh"] = mesh
+	return mesh
+
+
+func _limb_mat(suit: int, part: int, ld: Dictionary) -> ShaderMaterial:
+	var k := "limb%d/%d/%s" % [suit, part, pal_key]
+	if mats.has(k):
+		return mats[k]
+	var sm := ShaderMaterial.new()
+	sm.shader = LIMB
+	sm.set_shader_parameter("views", ld["tex"])
+	sm.set_shader_parameter("view_count", ld["views"])
+	mats[k] = sm
+	return sm
 
 
 func _add_zone(m: Dictionary, z: Dictionary) -> void:

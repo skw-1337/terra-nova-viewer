@@ -13,8 +13,11 @@ Lancement : double-clic sur `Lancer le visualiseur.bat` (Godot est dans `C:\Tool
   avec les transitions orientées comme le fait le moteur (d'après les cases voisines).
 - Eau quand une grande zone plate est au niveau le plus bas.
 - Vrais modèles 3D des objets (véhicules, vaisseaux, bâtiments, décor), texturés avec la palette
-  de la planète, orientés et à l'échelle du jeu. Les soldats (armures) sont des sprites animés pas
-  encore décodés : petits blocs bleus (SFC) / rouges (ennemis). Étiquette avec le nom et le groupe.
+  de la planète, orientés et à l'échelle du jeu. Étiquette avec le nom et le groupe.
+- Soldats en armure dessinés comme dans le jeu : un squelette dont chaque membre est une image
+  étirée entre deux articulations, vue choisie selon l'angle de la caméra. Pose de repos debout
+  (le jeu anime les armures par calcul, il n'y a pas de pose stockée). Le bipède mécanique est fait
+  de petits modèles 3D sur le même principe.
 - Arbres, buissons et rochers : les vrais sprites du jeu, à la taille que leur donne le moteur.
 - Galerie (dernière entrée de la liste) : les 119 modèles 3D distincts, avec leur nom de fichier
   et les types d'objets qui les utilisent.
@@ -63,8 +66,11 @@ Lancement : double-clic sur `Lancer le visualiseur.bat` (Godot est dans `C:\Tool
 | RESGAME / casques | couleurs 0-16 de la palette (fixes) ; la planète fournit 17-255 |
 | MISSx.RES 170 / 172 / 173 / 176 / 177 | carte / groupes / entités (50 o, 16.16) / coordonnées des zones / noms des zones |
 
-Carreau d'un point : `octet & 0x3F`. Le bit 7 (~57 % des points) n'est pas une orientation : l'orientation des
-carreaux de transition n'est pas stockée, elle se déduit des matières des 8 cases voisines (auto-raccordement).
+Carreau d'un point : `octet & 0x3F`. Le bit 7 (~57 % des points) n'est pas une orientation (le bit 6 n'est
+jamais à 1) : l'orientation n'est pas stockée, elle se déduit des matières des 8 cases voisines
+(auto-raccordement). Ça vaut pour les carreaux de transition de la table 46, et aussi pour les carreaux
+« à un seul côté » d'une matière (bord de route en triangle, bordure rayée des dalles, coins) : leur partie
+de la matière (repérée avec le carreau le plus uni de cette matière) regarde les cases de la même matière.
 
 ### Modèles 3D
 
@@ -83,7 +89,20 @@ couleur donnée à l'exécution (voyant d'alarme).
 Sprites : le moteur leur donne une largeur de 2 × le rayon de collision du type, la hauteur suit les
 proportions de l'image.
 
+### Soldats
+
+Type de soldat → n° d'armure : octet à 0x395CA5 + 70 × type dans `__FF.EXE` (SFC léger / standard /
+lourd 0-2, Hog 3, Hog éclaireur 4, Hog lourd 5, clones 6-8, pirate 9, capitaine 10, bipède 11).
+Armure s → RESTNOBJ 800 + 7 s + pièce (0 pied, 1 tibia, 2 cuisse, 3 bras, 4 avant-bras, 5 torse,
+6 autre avant-bras). Une pièce : u8 nombre de vues (16 tout autour, 9 de dos à face pour le torse),
+longueur en pixels entre les deux articulations (u32 à 9), décalages des vues (u32 à 13) ; chaque vue
+est un bitmap LG dont les octets 16-19 donnent la position des deux articulations dans l'image.
+Squelettes : 884 (la plupart), 885 (clones, pirates : 7e pièce), 886 (bipède, pièces = modèles 3D
+877-883) ; octet 1 = nombre de segments, segments de 16 o à partir de 0x14 : articulation a, b, chaîne,
+drapeaux, u16 pièce. 16 articulations : 0/1 orteils, 2/3 chevilles, 4/5 genoux, 6/7 hanches, 8 bassin,
+9 cou, 10/11 épaules, 12/13 coudes, 14/15 mains.
+
 ## À faire
 
-- Soldats : sprites animés à 16 directions (RESTNOBJ 800-883), table des types à trouver.
+- Soldats : vraies poses (le jeu les calcule : cinématique inverse des pieds), tourelles orientables.
 - Ciel de la planète (SKYn.RES).

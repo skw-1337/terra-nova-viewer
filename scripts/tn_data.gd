@@ -158,13 +158,20 @@ func load_map(path: String, mission_file: String) -> Dictionary:
 	var pl := load_planet(resolve(mission_file, planet))
 	var detail := _grid(r.data(86), DETAIL_N, pl)
 	var outer := _grid(r.data(85), COARSE_N, pl) if r.has(85) else {}
-	var veg := []
+	# Vegetation, as the engine lays it out: resource 83 = 128 x 128 map (stored column by column)
+	# of 4 x 4 unit cells; value v > 0 puts vegetation list v (resource 119 + v) in the cell,
+	# each list item at an offset inside the cell (16.16 fixed point, 0..4).
+	var veg_sets := []
 	for rid in range(120, 150):
+		var items := []
 		for t in LGRes.frames(r.data(rid)):
 			var f: PackedByteArray = t
 			if f.size() >= 24:
-				veg.append({"cls": f[0], "sub": f[1], "x": f.decode_s32(8) / 256.0, "y": f.decode_s32(12) / 256.0})
-	return {"planet": planet, "planet_data": pl, "detail": detail, "outer": outer, "veg": veg, "info": info}
+				items.append({"cls": f[0], "sub": f[1], "ox": f.decode_s32(8) / 65536.0, "oy": f.decode_s32(12) / 65536.0})
+		veg_sets.append(items)
+	var veg_map: PackedByteArray = r.data(83)
+	return {"planet": planet, "planet_data": pl, "detail": detail, "outer": outer,
+			"veg_map": veg_map, "veg_sets": veg_sets, "info": info}
 
 
 # Grid: heights, tile index per vertex (byte & 0x3F), fallback vertex colors, and the tile map

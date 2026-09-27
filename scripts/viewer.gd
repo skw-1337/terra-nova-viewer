@@ -18,6 +18,7 @@ var path_edit: LineEdit
 var missions := []
 var labels_on := true
 var zones_on := true
+var veg_on := true
 var yaw := 0.0
 var pitch := -0.45
 var speed := 30.0
@@ -136,7 +137,7 @@ func _build_ui() -> void:
 	status.anchor_bottom = 1.0
 	status.offset_left = 10
 	status.offset_top = -34
-	status.text = "Right mouse: look   WASD/ZQSD: move   Space/Ctrl: up/down   Shift: fast   Wheel: speed   Tab: panel   F2: labels   F3: script zones (yellow posts)"
+	status.text = "Right mouse: look   WASD/ZQSD: move   Space/Ctrl: up/down   Shift: fast   Wheel: speed   Tab: panel   F2: labels   F3: script zones (yellow posts)   F4: vegetation"
 	ui.add_child(status)
 
 
@@ -214,9 +215,7 @@ func _load(index: int) -> void:
 		plane.material_override = mats["water"]
 		plane.position = Vector3(256, wl + 0.12, 256)
 		world.add_child(plane)
-	# m["veg"] (map resources 120-149) are NOT placed objects: 30 lists, one per ground type,
-	# used by the engine to scatter vegetation (their coordinates are a pattern, some fall
-	# outside the map or in water). Not drawn until that generation is understood.
+	var nveg := _add_vegetation(m)
 	var counts := {}
 	for e in mis["entities"]:
 		_add_object(m, e["cls"], e["sub"], e["x"], e["y"], e["heading"], e["group"], true)
@@ -225,14 +224,85 @@ func _load(index: int) -> void:
 		_add_zone(m, z)
 	current = {"map": m, "mission": mis, "entry": entry}
 	_place_camera(m, mis)
-	info.text = "%s\nmap %s (%s), %d objects, %d named zones%s\nloaded in %.1f s" % [
-		entry["label"], mis["map"], m["planet"], mis["entities"].size(), mis["zones"].size(), note,
+	info.text = "%s\nmap %s (%s), %d objects, %d named zones, %d plants%s\nloaded in %.1f s" % [
+		entry["label"], mis["map"], m["planet"], mis["entities"].size(), mis["zones"].size(), nveg, note,
 		(Time.get_ticks_msec() - t0) / 1000.0]
 	print(info.text.replace("\n", " | "))
 	var args := OS.get_cmdline_user_args()
 	var s := args.find("--shot")
 	if s >= 0 and s + 1 < args.size():
 		_screenshot(args[s + 1])
+
+
+# Vegetation generated like the engine does (see TNData.load_map): one MultiMesh per plant shape.
+func _add_vegetation(m: Dictionary) -> int:
+	var vmap: PackedByteArray = m["veg_map"]
+	var sets: Array = m["veg_sets"]
+	if vmap.size() < 128 * 128:
+		return 0
+	var groups := {}                  # shape -> Array[Transform3D]
+	var n := 0
+	for cx in 128:
+		for cy in 128:
+			var v := vmap[cx * 128 + cy]  # column by column
+			if v == 0 or v > sets.size():
+				continue
+			for it in sets[v - 1]:
+				var x: float = cx * 4.0 + it["ox"]
+				var y: float = cy * 4.0 + it["oy"]
+				var name: String = data.type_name(it["cls"], it["sub"]).to_lower()
+				var shape := "rock" if name.contains("rocher") or name.contains("rock") else (
+						"bush" if name.contains("buisson") or name.contains("bush") else "tree")
+				# small deterministic variety in size and turn
+				var hsh := absi(int(x * 73.0) * 31 + int(y * 57.0) * 17 + it["sub"] * 13)
+				var sc := 0.75 + float(hsh % 50) / 100.0
+				var basis := Basis(Vector3.UP, float(hsh % 628) / 100.0).scaled(Vector3(sc, sc, sc))
+				var ground := TNData.height_at(m, x, y)
+				if not groups.has(shape):
+					groups[shape] = []
+				groups[shape].append(Transform3D(basis, Vector3(x, ground, y)))
+				n += 1
+	for shape in groups:
+		var mesh: Mesh
+		var mat: Material = mats["tree"]
+		match shape:
+			"tree":
+				var cone := CylinderMesh.new()
+				cone.top_radius = 0.0
+				cone.bottom_radius = 1.1
+				cone.height = 4.5
+				cone.radial_segments = 7
+				cone.rings = 1
+				mesh = cone
+			"bush":
+				var sph := SphereMesh.new()
+				sph.radius = 0.7
+				sph.height = 1.0
+				sph.radial_segments = 8
+				sph.rings = 4
+				mesh = sph
+			_:
+				var bx := BoxMesh.new()
+				bx.size = Vector3(1.6, 1.0, 1.4)
+				mesh = bx
+				mat = mats["rock"]
+		var lift := mesh.get_aabb().size.y * 0.5
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = mesh
+		var list: Array = groups[shape]
+		mm.instance_count = list.size()
+		for i in list.size():
+			var tr: Transform3D = list[i]
+			tr.origin.y += lift * tr.basis.get_scale().y
+			mm.set_instance_transform(i, tr)
+		var mmi := MultiMeshInstance3D.new()
+		mmi.multimesh = mm
+		mmi.material_override = mat
+		mmi.add_to_group("vegetation")
+		mmi.visible = veg_on
+		world.add_child(mmi)
+	return n
 
 
 func _ground_mat(pl: Dictionary, grid: Dictionary, origin: Vector2, step: float) -> ShaderMaterial:
@@ -404,6 +474,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_F3:
 				zones_on = not zones_on
 				get_tree().call_group("zones", "set_visible", zones_on)
+			KEY_F4:
+				veg_on = not veg_on
+				get_tree().call_group("vegetation", "set_visible", veg_on)
 
 
 func _process(delta: float) -> void:

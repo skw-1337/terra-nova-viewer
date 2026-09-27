@@ -14,6 +14,8 @@ Lancement : double-clic sur `Lancer le visualiseur.bat` (Godot est dans `C:\Tool
 - Eau quand une grande zone plate est au niveau le plus bas.
 - Objets de la mission en blocs de couleur : bleu = SFC, rouge = ennemis, gris = bâtiments,
   marron = décor, cônes verts = arbres, boules vertes = buissons. Étiquette avec le nom et le groupe.
+- Forêts générées comme dans le jeu : la carte de végétation 128 × 128 de la map choisit, case par case
+  (4 × 4 unités), une des 30 listes de plantes (arbres, buissons, rochers en formes simples).
 - Zones nommées du script (points de largage, déclencheurs, « mystery pt »...) en poteaux jaunes.
 - 61 entrées : 37 missions de campagne, entraînement, missions coupées 40-41 (sur le terrain
   plat du générateur, leurs cartes n'existent plus), 16 modèles du générateur, 4 missions des démos.
@@ -28,7 +30,7 @@ Lancement : double-clic sur `Lancer le visualiseur.bat` (Godot est dans `C:\Tool
 | Maj | ×4 |
 | Molette | vitesse |
 | Tab | panneau des missions |
-| F2 / F3 | étiquettes / zones |
+| F2 / F3 / F4 | étiquettes / zones / végétation |
 
 ## Formats (rétro-ingénierie)
 
@@ -39,7 +41,8 @@ Lancement : double-clic sur `Lancer le visualiseur.bat` (Godot est dans `C:\Tool
 | MAPx.RES 85 | 257 × 257 × 3 octets, même format, pas de 4, décalage 256 |
 | MAPx.RES 80 | nom du fichier planète (`resplntN.res`) |
 | MAPx.RES 84 | 30 noms de types de sol (16 o) |
-| MAPx.RES 120-149 | 30 listes de végétation (50 o), une par type de sol : motifs servant à semer les forêts, PAS des objets posés (coordonnées hors carte ou dans l'eau) |
+| MAPx.RES 83 | carte de végétation 128 × 128 octets, rangée colonne par colonne (index = x × 128 + y), cases de 4 × 4 unités ; valeur v > 0 → liste 119 + v |
+| MAPx.RES 120-149 | 30 listes de végétation (entrées de 50 o : classe, sous-type, décalages X/Y en 16.16 de 0 à 4 dans la case) |
 | RESPLNTn 48 | carreaux de sol 64 × 64 rangés à la suite (4096 o chacun ; 64 carreaux, 53 et 59 pour les planètes 2 et 3) |
 | RESPLNTn 43 | carreau → matière (64 entrées) |
 | RESPLNTn 47 | matière → premier carreau, nombre de variantes |
@@ -55,5 +58,5 @@ carreaux de transition n'est pas stockée, elle se déduit des matières des 8 c
 ## À faire
 
 - Modèles 3D des objets (ressources 800-886 de RESTNOBJ.RES, format à décoder).
-- Forêts générées : comprendre comment le moteur répète les listes 120-149 selon le type de sol.
+- Vrais modèles des arbres et rochers (mêmes ressources que les objets).
 - Ciel de la planète (SKYn.RES).

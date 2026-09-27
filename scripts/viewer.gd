@@ -206,8 +206,9 @@ func _load(index: int) -> void:
 		plane.material_override = mats["water"]
 		plane.position = Vector3(256, wl + 0.12, 256)
 		world.add_child(plane)
-	for v in m["veg"]:
-		_add_object(m, v["cls"], v["sub"], v["x"], v["y"], 0.0, "", false)
+	# m["veg"] (map resources 120-149) are NOT placed objects: 30 lists, one per ground type,
+	# used by the engine to scatter vegetation (their coordinates are a pattern, some fall
+	# outside the map or in water). Not drawn until that generation is understood.
 	var counts := {}
 	for e in mis["entities"]:
 		_add_object(m, e["cls"], e["sub"], e["x"], e["y"], e["heading"], e["group"], true)

@@ -73,6 +73,10 @@ jamais à 1) : l'orientation n'est pas stockée, elle se déduit des matières d
 (auto-raccordement). Ça vaut pour les carreaux de transition de la table 46, et aussi pour les carreaux
 « à un seul côté » d'une matière (bord de route en triangle, bordure rayée des dalles, coins) : leur partie
 de la matière (repérée avec le carreau le plus uni de cette matière) regarde les cases de la même matière.
+Le visualiseur fait une première estimation d'après les matières voisines, puis recommence avec
+l'orientation déjà choisie des voisins jusqu'à stabilité (une route diagonale faite uniquement de carreaux de
+transition se règle de proche en proche), puis polit les transitions par continuité des couleurs de bord.
+Résultat mis en cache par carte (`user://tilemaps`), premier chargement de 1 à 7 s.
 
 ### Modèles 3D
 

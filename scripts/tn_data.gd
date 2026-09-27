@@ -38,6 +38,7 @@ static func find_root(extra: String) -> String:
 
 func setup(game_root: String) -> bool:
 	root = game_root
+	clean_tilemap_cache()
 	var g = LGRes.open(data_dir().path_join("RESGAME.RES"))
 	var m = LGRes.open(data_dir().path_join("RESMISS.RES"))
 	if g == null or m == null:
@@ -159,8 +160,8 @@ func load_map(path: String, mission_file: String) -> Dictionary:
 			planet = raw80.slice(i, i + 12).get_string_from_ascii()
 			break
 	var pl := load_planet(resolve(mission_file, planet))
-	var detail := _grid(r.data(86), DETAIL_N, pl)
-	var outer := _grid(r.data(85), COARSE_N, pl) if r.has(85) else {}
+	var detail := _grid(r.data(86), DETAIL_N, pl, path + "#86")
+	var outer := _grid(r.data(85), COARSE_N, pl, path + "#85") if r.has(85) else {}
 	# Vegetation, as the engine lays it out: resource 83 = 128 x 128 map (stored column by column)
 	# of 4 x 4 unit cells; value v > 0 puts vegetation list v (resource 119 + v) in the cell,
 	# each list item at an offset inside the cell (16.16 fixed point, 0..4).
@@ -179,7 +180,7 @@ func load_map(path: String, mission_file: String) -> Dictionary:
 
 # Grid: heights, tile index per vertex (byte & 0x3F), fallback vertex colors, and the tile map
 # (R = tile, G = quarter turns) used by the terrain shader.
-func _grid(d: PackedByteArray, n: int, pl: Dictionary) -> Dictionary:
+func _grid(d: PackedByteArray, n: int, pl: Dictionary, key: String = "") -> Dictionary:
 	var h := PackedFloat32Array()
 	h.resize(n * n)
 	var col := PackedColorArray()
@@ -197,70 +198,199 @@ func _grid(d: PackedByteArray, n: int, pl: Dictionary) -> Dictionary:
 		col[i] = tile_color[t]
 	var grid := {"n": n, "h": h, "col": col, "tile": tiles}
 	if pl["ok"]:
-		grid["tilemap"] = _tilemap(tiles, n, pl)
+		grid["tilemap"] = _tilemap(tiles, n, pl, key)
 	return grid
 
 
 # Transition tiles (sand/water edge, road diagonal...) and one-sided tiles of a single material
 # (road edge triangle, hazard-striped pad border) are stored without orientation: like the engine,
 # turn each one so that its sides match the materials of the 8 neighbouring cells.
-func _tilemap(tiles: PackedByteArray, n: int, pl: Dictionary) -> Image:
+#  1. first guess from the neighbours' materials (neighbouring transition tiles: unknown);
+#  2. again with the neighbours' chosen orientations, until nothing changes (a diagonal road made
+#     of transition tiles only is settled step by step from its ends);
+#  3. polish the transition tiles (not the one-sided ones, whose stripes would drift inwards):
+#     keep the turn whose edges best continue the neighbours' edge colors.
+# The result is cached per map file in user://tilemaps.
+const TILEMAP_VERSION := 4
+const NB8 := [Vector2i(0, -1), Vector2i(1, -1), Vector2i(1, 0), Vector2i(1, 1), Vector2i(0, 1),
+		Vector2i(-1, 1), Vector2i(-1, 0), Vector2i(-1, -1)]   # N NE E SE S SW W NW
+const SIDE_DX := [0, 1, 0, -1]                                  # N E S W
+const SIDE_DY := [-1, 0, 1, 0]
+
+
+func _tilemap(tiles: PackedByteArray, n: int, pl: Dictionary, key: String) -> Image:
+	var cache_path := ""
+	if key != "":
+		var src := key.get_slice("#", 0)
+		var sig := "%s|%d|%d|%d" % [key, FileAccess.get_modified_time(src), TILEMAP_VERSION, n]
+		cache_path = "%s/%08x.bin" % [_tilemap_dir(), sig.hash() & 0xFFFFFFFF]
+		if FileAccess.file_exists(cache_path):
+			var cached := FileAccess.get_file_as_bytes(cache_path)
+			if cached.size() == n * n * 2:
+				return Image.create_from_data(n, n, false, Image.FORMAT_RG8, cached)
 	var mat: PackedByteArray = pl["mat"]
 	var pair: Dictionary = pl["pair"]
 	var prof: Dictionary = pl["prof"]
 	var own: Dictionary = pl["own"]
+	var edge: PackedFloat32Array = pl["edge"]
+	var rot := PackedByteArray()
+	rot.resize(n * n)
+	var cells := PackedInt32Array()
+	var directional := PackedByteArray()
+	directional.resize(n * n)
+	for i in n * n:
+		if pair.has(tiles[i]) or own.has(tiles[i]):
+			cells.append(i)
+			directional[i] = 1
+	# 1. first guess
+	var first := PackedByteArray()
+	first.resize(n * n)
+	for i in cells:
+		first[i] = _best_turn(tiles, rot, directional, n, i, mat, pair, prof, own, true)
+	rot = first
+	# 2. neighbours' orientations: work list of the cells whose neighbourhood changed
+	var queued := PackedByteArray()
+	queued.resize(n * n)
+	var queue := cells.duplicate()
+	for i in cells:
+		queued[i] = 1
+	var budget := cells.size() * 8
+	var head := 0
+	while head < queue.size() and budget > 0:
+		var i := queue[head]
+		head += 1
+		budget -= 1
+		queued[i] = 0
+		var r := _best_turn(tiles, rot, directional, n, i, mat, pair, prof, own, false)
+		if r != rot[i]:
+			rot[i] = r
+			var x := i % n
+			var y := i / n
+			for k in 8:
+				var xx: int = x + NB8[k].x
+				var yy: int = y + NB8[k].y
+				if xx >= 0 and yy >= 0 and xx < n and yy < n:
+					var j := yy * n + xx
+					if directional[j] == 1 and queued[j] == 0:
+						queued[j] = 1
+						queue.append(j)
+	# 3. edge colors
+	for polish in 3:
+		var changed := false
+		for i in cells:
+			var t := tiles[i]
+			if not pair.has(t):
+				continue
+			var x := i % n
+			var y := i / n
+			var best := int(rot[i])
+			var best_cost := INF
+			for r in 4:
+				var cost := 0.0
+				for side in 4:
+					var nx: int = x + SIDE_DX[side]
+					var ny: int = y + SIDE_DY[side]
+					if nx < 0 or ny < 0 or nx >= n or ny >= n:
+						continue
+					var j := ny * n + nx
+					var ea := ((t * 4 + r) * 4 + side) * 24
+					var eb := ((tiles[j] * 4 + rot[j]) * 4 + (side + 2) % 4) * 24
+					for q in 24:
+						cost += absf(edge[ea + q] - edge[eb + q])
+				if cost < best_cost - 0.001:
+					best_cost = cost
+					best = r
+			if best != rot[i]:
+				rot[i] = best
+				changed = true
+		if not changed:
+			break
 	var out := PackedByteArray()
 	out.resize(n * n * 2)
-	var nb := [Vector2i(0, -1), Vector2i(1, -1), Vector2i(1, 0), Vector2i(1, 1), Vector2i(0, 1),
-			Vector2i(-1, 1), Vector2i(-1, 0), Vector2i(-1, -1)]   # N NE E SE S SW W NW
+	for i in n * n:
+		out[2 * i] = tiles[i]
+		out[2 * i + 1] = rot[i]
+	if cache_path != "":
+		DirAccess.make_dir_recursive_absolute(_tilemap_dir())
+		var fa := FileAccess.open(cache_path, FileAccess.WRITE)
+		if fa != null:
+			fa.store_buffer(out)
+	return Image.create_from_data(n, n, false, Image.FORMAT_RG8, out)
+
+
+static func _tilemap_dir() -> String:
+	return "user://tilemaps/v%d" % TILEMAP_VERSION
+
+
+# Removes the tile maps cached by other versions of the orientation code.
+static func clean_tilemap_cache() -> void:
+	var d := DirAccess.open("user://tilemaps")
+	if d == null:
+		return
+	for f in d.get_files():
+		d.remove(f)
+	for sub in d.get_directories():
+		if "user://tilemaps/" + sub != _tilemap_dir():
+			var ds := DirAccess.open("user://tilemaps/" + sub)
+			if ds != null:
+				for f in ds.get_files():
+					ds.remove(f)
+			d.remove(sub)
+
+
+# Best quarter turn of directional cell i. first: neighbouring directional tiles count as unknown;
+# otherwise their chosen turn tells which material touches us.
+func _best_turn(tiles: PackedByteArray, rot: PackedByteArray, directional: PackedByteArray, n: int,
+		i: int, mat: PackedByteArray, pair: Dictionary, prof: Dictionary, own: Dictionary, first: bool) -> int:
+	var t := tiles[i]
+	var x := i % n
+	var y := i / n
 	var obs := PackedFloat32Array()
 	obs.resize(8)
-	for y in n:
-		for x in n:
-			var i := y * n + x
-			var t := tiles[i]
-			out[2 * i] = t
-			if pair.has(t):
-				var ab: Vector2i = pair[t]
-				for k in 8:
-					var xx := clampi(x + nb[k].x, 0, n - 1)
-					var yy := clampi(y + nb[k].y, 0, n - 1)
-					var tt := tiles[yy * n + xx]
-					if pair.has(tt):
-						obs[k] = 0.5
-					else:
-						var m := mat[tt]
-						obs[k] = 1.0 if m == ab.x else (0.0 if m == ab.y else 0.5)
-			elif own.has(t):
-				# its own-material part faces the cells of the same material
-				var mo: int = own[t]
-				var lowest := 1.0
-				for k in 8:
-					var xx := clampi(x + nb[k].x, 0, n - 1)
-					var yy := clampi(y + nb[k].y, 0, n - 1)
-					var tt := tiles[yy * n + xx]
-					if mat[tt] != mo:
-						obs[k] = 0.0
-					else:
-						obs[k] = 0.75 if own.has(tt) else 1.0
-					lowest = minf(lowest, obs[k])
-				if lowest > 0.5:
-					continue              # inside its own material: nothing to line up with
-			else:
-				continue
-			var best := 0
-			var best_err := INF
-			var rots: Array = prof[t]
-			for r in 4:
-				var p: PackedFloat32Array = rots[r]
-				var err := 0.0
-				for k in 8:
-					err += absf(p[k] - obs[k])
-				if err < best_err:
-					best_err = err
-					best = r
-			out[2 * i + 1] = best
-	return Image.create_from_data(n, n, false, Image.FORMAT_RG8, out)
+	var is_pair := pair.has(t)
+	var ab: Vector2i = pair[t] if is_pair else Vector2i(own[t], -1)
+	var lowest := 1.0
+	for k in 8:
+		var xx := clampi(x + NB8[k].x, 0, n - 1)
+		var yy := clampi(y + NB8[k].y, 0, n - 1)
+		var j := yy * n + xx
+		var tt := tiles[j]
+		if directional[j] == 1 and first:
+			obs[k] = 0.5 if is_pair else (0.75 if mat[tt] == ab.x else 0.0)
+		elif is_pair:
+			var sa := _share(tt, rot[j], k, ab.x, mat, pair, prof, own)
+			var sb := _share(tt, rot[j], k, ab.y, mat, pair, prof, own)
+			obs[k] = 0.5 if sa + sb < 0.000001 else sa / (sa + sb)
+		else:
+			obs[k] = _share(tt, rot[j], k, ab.x, mat, pair, prof, own)
+		lowest = minf(lowest, obs[k])
+	if not is_pair and lowest > 0.5:
+		return 0                              # inside its own material: nothing to line up with
+	var best := 0
+	var best_err := INF
+	var rots: Array = prof[t]
+	for r in 4:
+		var p: PackedFloat32Array = rots[r]
+		var err := 0.0
+		for k in 8:
+			err += absf(p[k] - obs[k])
+		if err < best_err:
+			best_err = err
+			best = r
+	return best
+
+
+# Share of material m on the side of neighbour tile tt (turned r) that faces direction k from us.
+static func _share(tt: int, r: int, k: int, m: int, mat: PackedByteArray, pair: Dictionary,
+		prof: Dictionary, own: Dictionary) -> float:
+	if pair.has(tt):
+		var p: float = prof[tt][r][(k + 4) % 8]
+		var ab: Vector2i = pair[tt]
+		return p * float(ab.x == m) + (1.0 - p) * float(ab.y == m)
+	if own.has(tt):
+		var q: float = prof[tt][r][(k + 4) % 8]
+		return q if own[tt] == m else 0.5 * (1.0 - q)
+	return 1.0 if mat[tt] == m else 0.0
 
 
 # Planet file: 64x64 ground tiles stored one after the other (resource 48; some planets have
@@ -381,6 +511,43 @@ func _read_planet(path: String) -> Dictionary:
 	out["pair"] = pair
 	out["prof"] = prof
 	out["own"] = own
+	out["edge"] = _edges(rgb_tiles)
+	return out
+
+
+# Border colors of every tile for each quarter turn: sides N, E, S, W (N / S read left to right,
+# E / W top to bottom), 8 samples of 8 pixels, RGB 0-1. Index ((tile * 4 + turn) * 4 + side) * 24.
+static func _edges(rgb_tiles: Array) -> PackedFloat32Array:
+	var out := PackedFloat32Array()
+	out.resize(64 * 4 * 4 * 24)
+	for t in rgb_tiles.size():
+		var rgb: PackedByteArray = rgb_tiles[t]
+		for r in 4:
+			for side in 4:
+				for q in 8:
+					var acc := Vector3.ZERO
+					for u in 8:
+						var along := q * 8 + u
+						var i := along if side == 1 or side == 3 else (0 if side == 0 else 63)
+						var j := along if side == 0 or side == 2 else (63 if side == 1 else 0)
+						var si := i                  # source pixel of the turned tile (as the shader)
+						var sj := j
+						if r == 1:
+							si = 63 - j
+							sj = i
+						elif r == 2:
+							si = 63 - i
+							sj = 63 - j
+						elif r == 3:
+							si = j
+							sj = 63 - i
+						var p := (si * 64 + sj) * 3
+						acc += Vector3(rgb[p], rgb[p + 1], rgb[p + 2])
+					acc /= 8.0 * 255.0
+					var o := ((t * 4 + r) * 4 + side) * 24 + q * 3
+					out[o] = acc.x
+					out[o + 1] = acc.y
+					out[o + 2] = acc.z
 	return out
 
 

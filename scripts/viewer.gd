@@ -6,7 +6,21 @@ const Terrain = preload("res://scripts/terrain.gd")
 const TNObjects = preload("res://scripts/tn_objects.gd")
 const GROUND = preload("res://terrain.gdshader")
 const LIMB = preload("res://limb.gdshader")
-const SOLDIER_PX := 1.0 / 280.0      # world units per limb sprite pixel (suits ~0.45 tall)
+const SMOKE = preload("res://smoke.gdshader")
+const SMOKE_WIDTH := 1.4                # world width of a smoke column
+const POSES_FILE := "res://data/soldier_poses.json"   # real poses read from the running game
+# Standing pose computed by the game for a Hog scout (suit 4), read in a RAM snapshot:
+# joints (right, up, forward) in world units, ground at 0. Other suits get the same joint
+# directions with their own bone lengths (sprite pixel length / 256 x 1.09, the scout's own size).
+const TEMPLATE_POSE := [Vector3(-0.0378, 0.0, 0.0329), Vector3(0.0378, 0.0, 0.0329),
+		Vector3(-0.0279, 0.0422, -0.0169), Vector3(0.0279, 0.0422, -0.0169),
+		Vector3(-0.0203, 0.1445, 0.0034), Vector3(0.0388, 0.1445, 0.0035),
+		Vector3(-0.0312, 0.2494, 0.0), Vector3(0.0312, 0.2494, -0.0), Vector3(0.0, 0.2494, 0.0),
+		Vector3(0.0, 0.4043, 0.0), Vector3(-0.0689, 0.3826, 0.0117), Vector3(0.0874, 0.3826, 0.012),
+		Vector3(-0.0695, 0.322, 0.061), Vector3(0.0932, 0.3227, 0.0609),
+		Vector3(-0.0714, 0.3061, 0.1374), Vector3(0.111, 0.3112, 0.136)]
+const TEMPLATE_SUIT := 4
+const BODY_SCALE := 1.09
 const CFG := "user://viewer.cfg"
 
 var data = TNData.new()
@@ -477,7 +491,22 @@ func _add_object(m: Dictionary, cls: int, sub: int, x: float, y: float, heading:
 		var suit := TNObjects.suit_of(sub)
 		top = _add_mech(mi) if suit == TNObjects.MECH_SUIT else _add_soldier(mi, suit)   # parts = children
 		soldier = top > 0.0
-	if soldier:
+	if cls == 4 and sub == TNObjects.SMOKE_TYPE and objects_ok:
+		var sm: Dictionary = objects.smoke_anim(pal, pal_key)
+		if not sm.is_empty():
+			var q := QuadMesh.new()
+			q.size = Vector2(SMOKE_WIDTH, SMOKE_WIDTH * sm["aspect"])
+			q.center_offset = Vector3(0, q.size.y * 0.5, 0)
+			mi.mesh = q
+			var smat := ShaderMaterial.new()
+			smat.shader = SMOKE
+			smat.set_shader_parameter("frames", sm["tex"])
+			smat.set_shader_parameter("frame_count", sm["frames"])
+			mi.material_override = smat
+			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			mi.extra_cull_margin = SMOKE_WIDTH
+			top = q.size.y
+	if soldier or mi.mesh != null:
 		pass
 	elif TNObjects.is_model(ref):
 		var md: Dictionary = objects.model(ref, pal, pal_key)
@@ -527,10 +556,9 @@ func _add_object(m: Dictionary, cls: int, sub: int, x: float, y: float, heading:
 		mi.add_child(l)
 
 
-# Power suit in a standing rest pose (the game animates suits procedurally: no stored poses),
-# built from the lengths of its limb sprites. Joints of skeletons 884 / 885: 0/1 toes, 2/3 ankles,
-# 4/5 knees, 6/7 hips, 8 pelvis, 9 neck, 10/11 shoulders, 12/13 elbows, 14/15 hands.
-# Returns the suit height (0 when the suit has no sprites).
+# Power suit in its standing pose (see TEMPLATE_POSE); the limbs become children of holder.
+# Joints of skeletons 884 / 885: 0/1 toes, 2/3 ankles, 4/5 knees, 6/7 hips, 8 pelvis, 9 neck,
+# 10/11 shoulders, 12/13 elbows, 14/15 hands. Returns the suit height (0 when it has no sprites).
 func _add_soldier(holder: Node3D, suit: int) -> float:
 	var segs: Array = objects.skeleton(suit)
 	var limbs := {}
@@ -539,31 +567,15 @@ func _add_soldier(holder: Node3D, suit: int) -> float:
 		if ld.is_empty():
 			return 0.0
 		limbs[sg[2]] = ld
-	var ln := func(part: int) -> float: return limbs[part]["len"] if limbs.has(part) else 20.0
-	var p: Array[Vector3] = []                     # (right, up, forward) in sprite pixels
-	p.resize(16)
-	var ankle := 5.0
-	var hip_y: float = ankle + ln.call(1) + ln.call(2)
-	var neck_y: float = hip_y + ln.call(5)
-	for i in 2:
-		var side := -1.0 if i == 0 else 1.0
-		p[i] = Vector3(side * 7.0, 0.0, sqrt(maxf(ln.call(0) ** 2 - ankle * ankle, 1.0)))
-		p[2 + i] = Vector3(side * 7.0, ankle, 0.0)
-		p[4 + i] = Vector3(side * 7.0, ankle + ln.call(1), 0.0)
-		p[6 + i] = Vector3(side * 7.0, hip_y, 0.0)
-		p[10 + i] = Vector3(side * 20.0, neck_y - 4.0, 0.0)
-		p[12 + i] = p[10 + i] + Vector3(side * 2.0, -ln.call(3), 0.0)
-		p[14 + i] = p[12 + i] + Vector3(side * 1.0, -ln.call(4) * 0.97, ln.call(4) * 0.25)
-	p[8] = Vector3(0.0, hip_y, 0.0)
-	p[9] = Vector3(0.0, neck_y, 0.0)
+	var p := _soldier_pose(suit, segs, limbs)
 	var top := 0.0
 	for sg in segs:
 		var ld: Dictionary = limbs[sg[2]]
 		var a: Vector3 = p[sg[0]]
 		var b: Vector3 = p[sg[1]]
 		# (right, up, forward) -> node axes (forward = +X, right = +Z)
-		var ga := Vector3(a.z, a.y, a.x) * SOLDIER_PX
-		var gb := Vector3(b.z, b.y, b.x) * SOLDIER_PX
+		var ga := Vector3(a.z, a.y, a.x)
+		var gb := Vector3(b.z, b.y, b.x)
 		var dir := gb - ga
 		var sc: float = dir.length() / ld["len"]
 		var yn := dir.normalized()
@@ -581,6 +593,53 @@ func _add_soldier(holder: Node3D, suit: int) -> float:
 		holder.add_child(seg)
 		top = maxf(top, maxf(ga.y, gb.y))
 	return top + 0.1
+
+
+var captured_poses = null
+
+
+# The pose captured in the game for this suit when there is one (data/soldier_poses.json, written
+# by _MODS/re/poses.py), else the template pose rebuilt with this suit's bone lengths.
+func _soldier_pose(suit: int, segs: Array, limbs: Dictionary) -> Array[Vector3]:
+	if captured_poses == null:
+		captured_poses = {}
+		if FileAccess.file_exists(POSES_FILE):
+			var parsed = JSON.parse_string(FileAccess.get_file_as_string(POSES_FILE))
+			if parsed is Dictionary:
+				captured_poses = parsed
+	var p: Array[Vector3] = []
+	p.resize(16)
+	if captured_poses.has(str(suit)):
+		var raw: Array = captured_poses[str(suit)]
+		for k in mini(16, raw.size()):
+			p[k] = Vector3(raw[k][0], raw[k][1], raw[k][2])
+		return p
+	var t: Array[Vector3] = []
+	for v in TEMPLATE_POSE:
+		t.append(v)
+	var length := func(part: int) -> float:
+		return limbs[part]["len"] / 256.0 * BODY_SCALE if limbs.has(part) else 0.08
+	# free joints (pelvis, hips, shoulders) keep their place relative to the pelvis / neck,
+	# scaled with the torso; every limb keeps its direction and takes this suit's length
+	var k_torso: float = length.call(5) / t[8].distance_to(t[9])
+	p[8] = t[8]
+	p[9] = p[8] + (t[9] - t[8]).normalized() * length.call(5)
+	for i in 2:
+		p[6 + i] = p[8] + (t[6 + i] - t[8]) * k_torso
+		p[10 + i] = p[9] + (t[10 + i] - t[9]) * k_torso
+	for chain in [[6, 4, 2, 0], [7, 5, 3, 1], [10, 12, 14], [11, 13, 15]]:
+		for c in range(1, chain.size()):
+			var a: int = chain[c - 1]
+			var b: int = chain[c]
+			var part := -1
+			for sg in segs:
+				if (sg[0] == a and sg[1] == b) or (sg[0] == b and sg[1] == a):
+					part = sg[2]
+			p[b] = p[a] + (t[b] - t[a]).normalized() * length.call(part)
+	var ground := minf(minf(p[0].y, p[1].y), minf(p[2].y, p[3].y))
+	for k in 16:
+		p[k].y -= ground
+	return p
 
 
 # Biped mech (skeleton 886): legs and body are small 3D models (RESTNOBJ 877-883, "pbmb00-06"),

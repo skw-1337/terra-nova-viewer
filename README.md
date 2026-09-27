@@ -15,9 +15,11 @@ Lancement : double-clic sur `Lancer le visualiseur.bat` (Godot est dans `C:\Tool
 - Vrais modèles 3D des objets (véhicules, vaisseaux, bâtiments, décor), texturés avec la palette
   de la planète, orientés et à l'échelle du jeu. Étiquette avec le nom et le groupe.
 - Soldats en armure dessinés comme dans le jeu : un squelette dont chaque membre est une image
-  étirée entre deux articulations, vue choisie selon l'angle de la caméra. Pose de repos debout
-  (le jeu anime les armures par calcul, il n'y a pas de pose stockée). Le bipède mécanique est fait
-  de petits modèles 3D sur le même principe.
+  étirée entre deux articulations, vue choisie selon l'angle de la caméra. Pose debout réelle du
+  jeu (relevée en mémoire, arme en main), adaptée aux longueurs d'os de chaque armure ; les poses
+  relevées pour une armure précise (`data/soldier_poses.json`, écrit par `_MODS/re/poses.bat`
+  pendant une mission) sont prioritaires. Le bipède mécanique est fait de petits modèles 3D.
+- Fumées (bâtiments type 61) : colonne de fumée animée du jeu (animation translucide RESTNOBJ 1186).
 - Arbres, buissons et rochers : les vrais sprites du jeu, à la taille que leur donne le moteur.
 - Galerie (dernière entrée de la liste) : les 119 modèles 3D distincts, avec leur nom de fichier
   et les types d'objets qui les utilisent.
@@ -100,9 +102,16 @@ est un bitmap LG dont les octets 16-19 donnent la position des deux articulation
 Squelettes : 884 (la plupart), 885 (clones, pirates : 7e pièce), 886 (bipède, pièces = modèles 3D
 877-883) ; octet 1 = nombre de segments, segments de 16 o à partir de 0x14 : articulation a, b, chaîne,
 drapeaux, u16 pièce. 16 articulations : 0/1 orteils, 2/3 chevilles, 4/5 genoux, 6/7 hanches, 8 bassin,
-9 cou, 10/11 épaules, 12/13 coudes, 14/15 mains.
+9 cou, 10/11 épaules, 12/13 coudes, 14/15 mains. Longueur d'une pièce : u16 à 9 (l'octet 12 est un
+drapeau). Longueur d'os en jeu = pixels / 256 × taille propre du soldat (tirée au hasard, ~±12 %).
+Pas de pose stockée : le jeu calcule la marche à l'affichage (0x280934) et range les 16 articulations
+(x, y, z en 16.16, z vers le haut) à +0x1AF de la fiche soldat (0x3A56B8 + 0x582 × n, n = mot à +3 de
+l'entrée de la table maîtresse ; n° d'armure à +0xDE).
+
+Bitmaps de type 5 (translucides) : non compressés, 248 / 249 = fumée claire / dense passée par les
+tables de transparence du jeu.
 
 ## À faire
 
-- Soldats : vraies poses (le jeu les calcule : cinématique inverse des pieds), tourelles orientables.
+- Soldats : animation de marche ; pieds posés sur les pentes. Tourelles orientables.
 - Ciel de la planète (SKYn.RES).

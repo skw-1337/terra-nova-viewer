@@ -136,7 +136,54 @@ func limb(suit: int, part: int, pal: PackedColorArray, pal_key: String) -> Dicti
 				images.append(canvas)
 			var arr := Texture2DArray.new()
 			arr.create_from_images(images)
-			out = {"tex": arr, "views": n, "size": Vector2(w, h), "a1": float(top), "len": float(f.decode_u32(9))}
+			out = {"tex": arr, "views": n, "size": Vector2(w, h), "a1": float(top), "len": float(f.decode_u16(9))}
+	tex_cache[key] = out
+	return out
+
+
+# ------------------------------------------------------------------ effects
+# Translucent animations (bitmap type 5): 248 = thin smoke, 249 = dense smoke, both drawn by the
+# game through its translucency tables. 1186 = rising smoke column (13 frames), used for the
+# "Fumee" objects (buildings type 61, whose model entry is only an editor placeholder).
+const SMOKE_ANIM := 1186
+const SMOKE_TYPE := 61
+
+
+func smoke_anim(pal: PackedColorArray, pal_key: String) -> Dictionary:
+	var key := "smoke/%s" % pal_key
+	if tex_cache.has(key):
+		return tex_cache[key]
+	var out := {}
+	var images: Array[Image] = []
+	var size := Vector2i.ZERO
+	for fr in LGRes.frames(res.data(SMOKE_ANIM)):
+		var f: PackedByteArray = fr
+		if f.size() < 0x1c:
+			continue
+		var w := f.decode_u16(8)
+		var h := f.decode_u16(10)
+		var row := f.decode_u16(12)
+		if size == Vector2i.ZERO:
+			size = Vector2i(w, h)
+		if Vector2i(w, h) != size or f.size() < 0x1c + row * h:
+			continue
+		var img := Image.create(w, h, false, Image.FORMAT_RGBA8)
+		for y in h:
+			for x in w:
+				var v := f[0x1c + y * row + x]
+				if v == 248:
+					img.set_pixel(x, y, Color(0.62, 0.62, 0.6, 0.4))
+				elif v == 249:
+					img.set_pixel(x, y, Color(0.42, 0.42, 0.4, 0.6))
+				elif v != 0:
+					var c: Color = pal[v]
+					img.set_pixel(x, y, Color(c.r, c.g, c.b, 0.6))
+		img.generate_mipmaps()
+		images.append(img)
+	if not images.is_empty():
+		var arr := Texture2DArray.new()
+		arr.create_from_images(images)
+		out = {"tex": arr, "frames": images.size(), "aspect": float(size.y) / size.x}
 	tex_cache[key] = out
 	return out
 

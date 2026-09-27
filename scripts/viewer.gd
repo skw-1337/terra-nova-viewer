@@ -3,6 +3,7 @@ extends Node3D
 
 const TNData = preload("res://scripts/tn_data.gd")
 const Terrain = preload("res://scripts/terrain.gd")
+const GROUND = preload("res://terrain.gdshader")
 const CFG := "user://viewer.cfg"
 
 var data = TNData.new()
@@ -61,18 +62,18 @@ func _build_scene() -> void:
 	sky.sky_material = sm
 	env.sky = sky
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
-	env.ambient_light_energy = 0.55
+	env.ambient_light_energy = 0.35
 	env.fog_enabled = true
 	env.fog_light_color = Color(0.7, 0.76, 0.84)
-	env.fog_density = 0.0009
+	env.fog_density = 0.0005
 	env.fog_sky_affect = 0.3
-	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+	env.tonemap_mode = Environment.TONE_MAPPER_LINEAR
 	var we := WorldEnvironment.new()
 	we.environment = env
 	add_child(we)
 	var sun := DirectionalLight3D.new()
 	sun.rotation_degrees = Vector3(-52, -35, 0)
-	sun.light_energy = 1.35
+	sun.light_energy = 1.0
 	sun.shadow_enabled = true
 	sun.directional_shadow_max_distance = 250.0
 	add_child(sun)
@@ -194,9 +195,16 @@ func _load(index: int) -> void:
 		return
 	for c in world.get_children():
 		c.queue_free()
-	Terrain.build(world, m["detail"], 1.0, Vector2(0, 0), Rect2i(), mats["terrain"])
+	var pl: Dictionary = m["planet_data"]
+	var det_mat: Material = mats["terrain"]
+	var out_mat: Material = mats["terrain"]
+	if pl["ok"]:                          # real ground textures (else: average colors)
+		det_mat = _ground_mat(pl, m["detail"], Vector2(0, 0), 1.0)
+		if not m["outer"].is_empty():
+			out_mat = _ground_mat(pl, m["outer"], Vector2(-256, -256), 4.0)
+	Terrain.build(world, m["detail"], 1.0, Vector2(0, 0), Rect2i(), det_mat)
 	if not m["outer"].is_empty():
-		Terrain.build(world, m["outer"], 4.0, Vector2(-256, -256), Rect2i(64, 64, 128, 128), mats["terrain"])
+		Terrain.build(world, m["outer"], 4.0, Vector2(-256, -256), Rect2i(64, 64, 128, 128), out_mat)
 	var wl := Terrain.water_level(m["detail"])
 	if not is_nan(wl):
 		var plane := MeshInstance3D.new()
@@ -225,6 +233,17 @@ func _load(index: int) -> void:
 	var s := args.find("--shot")
 	if s >= 0 and s + 1 < args.size():
 		_screenshot(args[s + 1])
+
+
+func _ground_mat(pl: Dictionary, grid: Dictionary, origin: Vector2, step: float) -> ShaderMaterial:
+	var sm := ShaderMaterial.new()
+	sm.shader = GROUND
+	sm.set_shader_parameter("tiles", pl["textures"])
+	sm.set_shader_parameter("tilemap", ImageTexture.create_from_image(grid["tilemap"]))
+	sm.set_shader_parameter("origin", origin)
+	sm.set_shader_parameter("step_size", step)
+	sm.set_shader_parameter("grid_n", float(grid["n"]))
+	return sm
 
 
 func _add_object(m: Dictionary, cls: int, sub: int, x: float, y: float, heading: float, group: String,
@@ -340,6 +359,13 @@ func _place_camera(m: Dictionary, mis: Dictionary) -> void:
 	yaw = 0.0
 	pitch = -0.45
 	camera.position = Vector3(target.x, ground + 28.0, target.y + 45.0)
+	var args := OS.get_cmdline_user_args()
+	var c := args.find("--cam")          # test: --cam x,y,height_above_ground,yaw_deg,pitch_deg
+	if c >= 0 and c + 1 < args.size():
+		var v := args[c + 1].split_floats(",")
+		camera.position = Vector3(v[0], TNData.height_at(m, v[0], v[1]) + v[2], v[1])
+		yaw = deg_to_rad(v[3])
+		pitch = deg_to_rad(v[4])
 	camera.rotation = Vector3(pitch, yaw, 0)
 
 

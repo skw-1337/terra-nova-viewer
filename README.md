@@ -9,7 +9,8 @@ Lancement : double-clic sur `Lancer le visualiseur.bat` (Godot est dans `C:\Tool
 
 - Relief complet : carte détaillée 513 × 513 (1 unité entre deux points) au centre,
   entourée de la grille grossière 257 × 257 (4 unités) qui forme l'horizon, de −256 à 768.
-- Couleurs du sol tirées des vraies textures de la planète (atlas + palette du fichier RESPLNTn).
+- Vraies textures du sol (carreaux 64 × 64 du fichier planète RESPLNTn), une par case de terrain,
+  avec les transitions orientées comme le fait le moteur (d'après les cases voisines).
 - Eau quand une grande zone plate est au niveau le plus bas.
 - Objets de la mission en blocs de couleur : bleu = SFC, rouge = ennemis, gris = bâtiments,
   marron = décor, cônes verts = arbres, boules vertes = buissons. Étiquette avec le nom et le groupe.
@@ -39,16 +40,20 @@ Lancement : double-clic sur `Lancer le visualiseur.bat` (Godot est dans `C:\Tool
 | MAPx.RES 80 | nom du fichier planète (`resplntN.res`) |
 | MAPx.RES 84 | 30 noms de types de sol (16 o) |
 | MAPx.RES 120-149 | 30 listes de végétation (50 o), une par type de sol : motifs servant à semer les forêts, PAS des objets posés (coordonnées hors carte ou dans l'eau) |
-| RESPLNTn 48 | atlas de textures du sol, 512 de large, bandes de 32 px (eau, sable, herbe, roche, neige, transitions...) |
+| RESPLNTn 48 | carreaux de sol 64 × 64 rangés à la suite (4096 o chacun ; 64 carreaux, 53 et 59 pour les planètes 2 et 3) |
+| RESPLNTn 43 | carreau → matière (64 entrées) |
+| RESPLNTn 47 | matière → premier carreau, nombre de variantes |
+| RESPLNTn 46 | table des transitions : index = matièreA × 50 + matièreB × 5 + forme → carreau |
+| RESPLNTn 49 | les 64 carreaux en 16 × 16 (version basse résolution) |
 | RESPLNTn 50 | palette : 239 couleurs RGB à partir de l'indice 17 |
 | RESPLNTn 51 | noms des matières (water, sand, grass, rock, snow, grass2, road, concrete, cliff, rock2) |
 | MISSx.RES 170 / 172 / 173 / 176 / 177 | carte / groupes / entités (50 o, 16.16) / coordonnées des zones / noms des zones |
 
-Type de sol d'un point : `(octet & 0x1F) >> 2` = bande de l'atlas.
+Carreau d'un point : `octet & 0x3F`. Le bit 7 (~57 % des points) n'est pas une orientation : l'orientation des
+carreaux de transition n'est pas stockée, elle se déduit des matières des 8 cases voisines (auto-raccordement).
 
 ## À faire
 
-- Textures du sol plaquées (atlas) au lieu des couleurs moyennes.
 - Modèles 3D des objets (ressources 800-886 de RESTNOBJ.RES, format à décoder).
 - Forêts générées : comprendre comment le moteur répète les listes 120-149 selon le type de sol.
 - Ciel de la planète (SKYn.RES).

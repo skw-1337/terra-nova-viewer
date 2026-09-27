@@ -22,6 +22,7 @@ const HEIGHT_SCALE := 0.6875 / 256.0
 var root := ""               # game folder (contains TNOVA)
 var type_names := {}         # class -> PackedStringArray
 var mission_names := PackedStringArray()
+var planet_cache := {}
 
 
 static func find_root(extra: String) -> String:
@@ -142,7 +143,7 @@ func load_mission(path: String) -> Dictionary:
 	return {"map": LGRes.text(r.data(170)), "groups": groups, "zones": zones, "entities": ents}
 
 
-# Map file -> heights, tile colors (detail + outer grid), fixed vegetation.
+# Map file -> heights, ground tiles (detail + outer grid), planet textures.
 func load_map(path: String, mission_file: String) -> Dictionary:
 	var r = LGRes.open(path)
 	if r == null or not r.has(86):
@@ -154,60 +155,203 @@ func load_map(path: String, mission_file: String) -> Dictionary:
 		if raw80.slice(i, i + 7).get_string_from_ascii().to_lower() == "resplnt":
 			planet = raw80.slice(i, i + 12).get_string_from_ascii()
 			break
-	var bands := planet_bands(resolve(mission_file, planet))
-	var detail := _grid(r.data(86), DETAIL_N, bands)
-	var outer := _grid(r.data(85), COARSE_N, bands) if r.has(85) else {}
+	var pl := load_planet(resolve(mission_file, planet))
+	var detail := _grid(r.data(86), DETAIL_N, pl)
+	var outer := _grid(r.data(85), COARSE_N, pl) if r.has(85) else {}
 	var veg := []
 	for rid in range(120, 150):
 		for t in LGRes.frames(r.data(rid)):
 			var f: PackedByteArray = t
 			if f.size() >= 24:
 				veg.append({"cls": f[0], "sub": f[1], "x": f.decode_s32(8) / 256.0, "y": f.decode_s32(12) / 256.0})
-	return {"planet": planet, "detail": detail, "outer": outer, "veg": veg, "info": info}
+	return {"planet": planet, "planet_data": pl, "detail": detail, "outer": outer, "veg": veg, "info": info}
 
 
-func _grid(d: PackedByteArray, n: int, bands: PackedColorArray) -> Dictionary:
+# Grid: heights, tile index per vertex (byte & 0x3F), fallback vertex colors, and the tile map
+# (R = tile, G = quarter turns) used by the terrain shader.
+func _grid(d: PackedByteArray, n: int, pl: Dictionary) -> Dictionary:
 	var h := PackedFloat32Array()
 	h.resize(n * n)
 	var col := PackedColorArray()
 	col.resize(n * n)
 	var tiles := PackedByteArray()
 	tiles.resize(n * n)
+	var tile_color: PackedColorArray = pl["tile_color"]
+	var count: int = pl["count"]
 	for i in n * n:
-		var b0 := d[3 * i]
+		var t := d[3 * i] & 0x3F
+		if t >= count:
+			t = 0
 		h[i] = d.decode_s16(3 * i + 1) * HEIGHT_SCALE
-		var band := mini((b0 & 0x1F) >> 2, bands.size() - 1)
-		tiles[i] = band
-		col[i] = bands[band] * (0.94 + 0.04 * (b0 & 3))
-	return {"n": n, "h": h, "col": col, "tile": tiles}
+		tiles[i] = t
+		col[i] = tile_color[t]
+	var grid := {"n": n, "h": h, "col": col, "tile": tiles}
+	if pl["ok"]:
+		grid["tilemap"] = _tilemap(tiles, n, pl)
+	return grid
 
 
-# Average color of each 32-pixel band of the planet's 512x512 ground texture atlas
-# (band 0 water, 1 sand, 2 grass, 3 rock, 4 snow, then transitions...).
-# Palette: resource 50 = 239 RGB colors starting at palette index 17.
-func planet_bands(path: String) -> PackedColorArray:
-	var out := PackedColorArray()
-	out.resize(16)
-	for b in 16:
-		out[b] = Color(0.45, 0.5, 0.35)
+# Transition tiles (sand/water edge, road diagonal...) are stored without orientation: like the
+# engine, turn each one so that its sides match the materials of the 8 neighbouring cells.
+func _tilemap(tiles: PackedByteArray, n: int, pl: Dictionary) -> Image:
+	var mat: PackedByteArray = pl["mat"]
+	var pair: Dictionary = pl["pair"]
+	var prof: Dictionary = pl["prof"]
+	var out := PackedByteArray()
+	out.resize(n * n * 2)
+	var nb := [Vector2i(0, -1), Vector2i(1, -1), Vector2i(1, 0), Vector2i(1, 1), Vector2i(0, 1),
+			Vector2i(-1, 1), Vector2i(-1, 0), Vector2i(-1, -1)]   # N NE E SE S SW W NW
+	var obs := PackedFloat32Array()
+	obs.resize(8)
+	for y in n:
+		for x in n:
+			var i := y * n + x
+			var t := tiles[i]
+			out[2 * i] = t
+			if not pair.has(t):
+				continue
+			var ab: Vector2i = pair[t]
+			for k in 8:
+				var xx := clampi(x + nb[k].x, 0, n - 1)
+				var yy := clampi(y + nb[k].y, 0, n - 1)
+				var tt := tiles[yy * n + xx]
+				if pair.has(tt):
+					obs[k] = 0.5
+				else:
+					var m := mat[tt]
+					obs[k] = 1.0 if m == ab.x else (0.0 if m == ab.y else 0.5)
+			var best := 0
+			var best_err := INF
+			var rots: Array = prof[t]
+			for r in 4:
+				var p: PackedFloat32Array = rots[r]
+				var err := 0.0
+				for k in 8:
+					err += absf(p[k] - obs[k])
+				if err < best_err:
+					best_err = err
+					best = r
+			out[2 * i + 1] = best
+	return Image.create_from_data(n, n, false, Image.FORMAT_RG8, out)
+
+
+# Planet file: 64x64 ground tiles stored one after the other (resource 48; some planets have
+# fewer than 64), palette (resource 50 = RGB colors from palette index 17), tile -> material
+# (resource 43), material -> first tile (47), transition table (46: index = a*50 + b*5 + k).
+func load_planet(path: String) -> Dictionary:
+	if planet_cache.has(path):
+		return planet_cache[path]
+	var res := _read_planet(path)
+	planet_cache[path] = res
+	return res
+
+
+func _read_planet(path: String) -> Dictionary:
+	var out := {"ok": false, "count": 64, "tile_color": PackedColorArray(), "textures": null}
+	var fallback := PackedColorArray()
+	fallback.resize(64)
+	fallback.fill(Color(0.45, 0.5, 0.35))
+	out["tile_color"] = fallback
 	var r = LGRes.open(path)
-	if r == null or not r.has(48) or not r.has(50):
+	if r == null or not r.has(48) or not r.has(50) or not r.has(43):
 		return out
 	var pal: PackedByteArray = r.data(50)
-	var atlas: PackedByteArray = r.data(48)
-	var bands := mini(16, atlas.size() / 512 / 32)   # some planets have a shorter atlas
-	for b in bands:
+	var raw: PackedByteArray = r.data(48)
+	var count := mini(64, raw.size() / 4096)
+	var images: Array[Image] = []
+	var tile_color := PackedColorArray()
+	tile_color.resize(64)
+	tile_color.fill(Color(0.45, 0.5, 0.35))
+	var rgb_tiles := []
+	for t in count:
+		var rgb := PackedByteArray()
+		rgb.resize(64 * 64 * 3)
 		var acc := Vector3.ZERO
-		var cnt := 0
-		for y in range(b * 32, b * 32 + 32, 2):
-			for x in range(0, 512, 2):
-				var idx := atlas[y * 512 + x] - 17
-				if idx >= 0 and 3 * idx + 2 < pal.size():
-					acc += Vector3(pal[3 * idx], pal[3 * idx + 1], pal[3 * idx + 2])
-					cnt += 1
-		if cnt > 0:
-			acc /= float(cnt) * 255.0
-			out[b] = Color(acc.x, acc.y, acc.z)
+		for p in 4096:
+			var idx := raw[t * 4096 + p] - 17
+			var c := Vector3.ZERO
+			if idx >= 0 and 3 * idx + 2 < pal.size():
+				c = Vector3(pal[3 * idx], pal[3 * idx + 1], pal[3 * idx + 2])
+			rgb[3 * p] = int(c.x)
+			rgb[3 * p + 1] = int(c.y)
+			rgb[3 * p + 2] = int(c.z)
+			acc += c
+		acc /= 4096.0 * 255.0
+		tile_color[t] = Color(acc.x, acc.y, acc.z)
+		rgb_tiles.append(rgb)
+		var img := Image.create_from_data(64, 64, false, Image.FORMAT_RGB8, rgb)
+		img.generate_mipmaps()
+		images.append(img)
+	var arr := Texture2DArray.new()
+	arr.create_from_images(images)
+	var mat: PackedByteArray = r.data(43)
+	var first: PackedByteArray = r.data(47)
+	var t46: PackedByteArray = r.data(46)
+	var pair := {}
+	for i in t46.size():
+		if t46[i] != 255 and t46[i] < count:
+			pair[t46[i]] = Vector2i(i / 50, (i / 5) % 10)
+	# mean color of each material (its first tile), to tell A from B inside transition tiles
+	var mat_color := {}
+	for m in first.size() / 2:
+		var ft := first[2 * m]
+		if first[2 * m + 1] > 0 and ft < count:
+			mat_color[m] = tile_color[ft]
+	var prof := {}
+	for t in pair.keys():                # copy of the keys: entries are erased below
+		var ab: Vector2i = pair[t]
+		if not mat_color.has(ab.x) or not mat_color.has(ab.y):
+			pair.erase(t)
+			continue
+		prof[t] = _profiles(rgb_tiles[t], mat_color[ab.x], mat_color[ab.y])
+	out["ok"] = true
+	out["count"] = count
+	out["tile_color"] = tile_color
+	out["textures"] = arr
+	out["mat"] = mat
+	out["pair"] = pair
+	out["prof"] = prof
+	return out
+
+
+# For a transition tile: share of material A on its 8 border regions (N NE E SE S SW W NW),
+# for each of the 4 clockwise quarter turns. Works on a 16x16 subsample.
+func _profiles(rgb: PackedByteArray, ca: Color, cb: Color) -> Array:
+	var m := PackedFloat32Array()
+	m.resize(256)
+	for y in 16:
+		for x in 16:
+			var p := (y * 4 * 64 + x * 4) * 3
+			var c := Vector3(rgb[p], rgb[p + 1], rgb[p + 2]) / 255.0
+			var da := c.distance_squared_to(Vector3(ca.r, ca.g, ca.b))
+			var db := c.distance_squared_to(Vector3(cb.r, cb.g, cb.b))
+			m[y * 16 + x] = 1.0 if da < db else 0.0
+	var out := []
+	var cur := m
+	for r in 4:
+		out.append(_regions(cur))
+		var nxt := PackedFloat32Array()
+		nxt.resize(256)
+		for i in 16:                     # clockwise quarter turn: new[i][j] = old[15 - j][i]
+			for j in 16:
+				nxt[i * 16 + j] = cur[(15 - j) * 16 + i]
+		cur = nxt
+	return out
+
+
+static func _regions(m: PackedFloat32Array) -> PackedFloat32Array:
+	# row / column ranges of the 8 regions on a 16x16 mask (3-pixel borders)
+	var rr := [[0, 3, 3, 13], [0, 3, 13, 16], [3, 13, 13, 16], [13, 16, 13, 16],
+			[13, 16, 3, 13], [13, 16, 0, 3], [3, 13, 0, 3], [0, 3, 0, 3]]
+	var out := PackedFloat32Array()
+	for q in rr:
+		var s := 0.0
+		var c := 0
+		for y in range(q[0], q[1]):
+			for x in range(q[2], q[3]):
+				s += m[y * 16 + x]
+				c += 1
+		out.append(s / c)
 	return out
 
 

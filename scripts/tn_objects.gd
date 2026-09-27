@@ -188,6 +188,67 @@ func smoke_anim(pal: PackedColorArray, pal_key: String) -> Dictionary:
 	return out
 
 
+# ------------------------------------------------------------------ skies
+# SKYn.RES (named by resource 178 of the mission): 152 = images (frame 0: 256 x 256 cloud texture,
+# absent on airless worlds; then clouds, sun, moons, planets), 153 = layout (u16 item count,
+# u8 base color; after the cloud texture and the moon slot, items of 12 bytes: u16 azimuth,
+# u16 elevation (1/65536 turn), ref (frame, 152), 4 bytes), 150 = haze tables (16 levels x 256
+# colors, level 15 = fully hazed).
+func load_sky(path: String, pal: PackedColorArray) -> Dictionary:
+	var r = LGRes.open(path)
+	if r == null or not r.has(152) or not r.has(153):
+		return {}
+	var f152 := LGRes.frames(r.data(152))
+	var out := {"clouds": null, "items": [], "haze": Color(0.7, 0.76, 0.84), "base": Color.BLACK, "sun": null}
+	if f152.size() > 0 and f152[0].size() > 0x1c and f152[0].decode_u16(8) == 256 and f152[0].decode_u16(10) == 256:
+		var img := _bitmap(f152[0], pal)
+		img.convert(Image.FORMAT_RGB8)
+		img.generate_mipmaps()
+		out["clouds"] = ImageTexture.create_from_image(img)
+	var lay: PackedByteArray = LGRes.frames(r.data(153))[0]
+	out["base"] = pal[lay[2]]
+	var t150: PackedByteArray = r.data(150)
+	if t150.size() >= 4096:
+		var acc := Vector3.ZERO
+		for i in range(146, 248):                  # colors of the ground, fully hazed
+			var c: Color = pal[t150[15 * 256 + i]]
+			acc += Vector3(c.r, c.g, c.b)
+		acc /= 102.0
+		out["haze"] = Color(acc.x, acc.y, acc.z)
+	var textures := {}
+	for k in range(0x20, lay.size() - 7, 12):
+		if lay.decode_u16(k + 6) != 152:
+			continue
+		var fr := lay.decode_u16(k + 4)
+		if fr >= f152.size():
+			continue
+		if not textures.has(fr):
+			var img2 := _bitmap(f152[fr], pal)
+			if img2 == null:
+				continue
+			var lum := 0.0
+			var cnt := 0
+			for y in img2.get_height():
+				for x in img2.get_width():
+					var c2 := img2.get_pixel(x, y)
+					if c2.a > 0.5:
+						lum += c2.get_luminance()
+						cnt += 1
+			img2.generate_mipmaps()
+			textures[fr] = {"tex": ImageTexture.create_from_image(img2),
+					"size": Vector2(img2.get_width(), img2.get_height()),
+					"bright": lum / maxi(cnt, 1)}
+		var it := {"frame": fr, "az": lay.decode_u16(k) / 65536.0 * TAU,
+				"el": lay.decode_u16(k + 2) / 65536.0 * TAU}
+		it.merge(textures[fr])
+		out["items"].append(it)
+		# the sun: a bright, round sprite
+		var sz: Vector2 = it["size"]
+		if it["bright"] > 0.85 and absf(sz.x - sz.y) < 0.3 * sz.x and out["sun"] == null:
+			out["sun"] = it
+	return out
+
+
 func ref_for(cls: int, sub: int) -> Vector2i:
 	var arr: Array = refs.get(cls, [])
 	return arr[sub] if sub < arr.size() else Vector2i.ZERO

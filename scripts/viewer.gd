@@ -7,6 +7,10 @@ const TNObjects = preload("res://scripts/tn_objects.gd")
 const GROUND = preload("res://terrain.gdshader")
 const LIMB = preload("res://limb.gdshader")
 const SMOKE = preload("res://smoke.gdshader")
+const SKY_SHADER = preload("res://sky.gdshader")
+const SKY_DISTANCE := 2400.0             # sky sprites: far away, following the camera
+const SKY_PIXEL := 0.0024                # their angular size per image pixel (radians)
+const DEFAULT_SUN := Vector3(-52, -35, 0)
 const SMOKE_WIDTH := 1.4                # world width of a smoke column
 const POSES_FILE := "res://data/soldier_poses.json"   # real poses read from the running game
 # Standing pose computed by the game for a Hog scout (suit 4), read in a RAM snapshot:
@@ -45,6 +49,9 @@ var pitch := -0.45
 var speed := 30.0
 var look := false
 var current := {}
+var env: Environment
+var sun: DirectionalLight3D
+var sky_root: Node3D
 var mats := {}
 
 
@@ -75,7 +82,7 @@ func _ready() -> void:
 
 # ------------------------------------------------------------------ scene
 func _build_scene() -> void:
-	var env := Environment.new()
+	env = Environment.new()
 	env.background_mode = Environment.BG_SKY
 	var sky := Sky.new()
 	var sm := ProceduralSkyMaterial.new()
@@ -94,14 +101,16 @@ func _build_scene() -> void:
 	var we := WorldEnvironment.new()
 	we.environment = env
 	add_child(we)
-	var sun := DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-52, -35, 0)
+	sun = DirectionalLight3D.new()
+	sun.rotation_degrees = DEFAULT_SUN
 	sun.light_energy = 1.0
 	sun.shadow_enabled = true
 	sun.directional_shadow_max_distance = 250.0
 	add_child(sun)
 	world = Node3D.new()
 	add_child(world)
+	sky_root = Node3D.new()
+	add_child(sky_root)
 	camera = Camera3D.new()
 	camera.far = 3000.0
 	camera.fov = 70.0
@@ -245,6 +254,7 @@ func _load(index: int) -> void:
 		world.add_child(plane)
 	pal = pl["palette"] if pl.has("palette") else data.full_palette(PackedByteArray())
 	pal_key = m["planet"]
+	_set_sky(data.resolve(entry["file"], mis.get("sky", "")) if mis.get("sky", "") != "" else "")
 	var nveg := _add_vegetation(m)
 	var counts := {}
 	for e in mis["entities"]:
@@ -799,7 +809,59 @@ func _unhandled_input(event: InputEvent) -> void:
 				get_tree().call_group("vegetation", "set_visible", veg_on)
 
 
+# The mission's sky (see TNObjects.load_sky): shader sky with the cloud texture and the haze color
+# (also the fog color), sprites placed by azimuth / elevation, sunlight from the sun sprite.
+func _set_sky(path: String) -> void:
+	for c in sky_root.get_children():
+		c.queue_free()
+	var sk: Dictionary = objects.load_sky(path, pal) if objects_ok and path != "" else {}
+	sun.rotation_degrees = DEFAULT_SUN
+	if sk.is_empty():
+		var sm := ProceduralSkyMaterial.new()
+		sm.sky_top_color = Color(0.32, 0.5, 0.78)
+		sm.sky_horizon_color = Color(0.72, 0.78, 0.86)
+		sm.ground_horizon_color = Color(0.72, 0.78, 0.86)
+		env.sky.sky_material = sm
+		env.fog_light_color = Color(0.7, 0.76, 0.84)
+		return
+	var mat := ShaderMaterial.new()
+	mat.shader = SKY_SHADER
+	mat.set_shader_parameter("has_clouds", sk["clouds"] != null)
+	if sk["clouds"] != null:
+		mat.set_shader_parameter("clouds", sk["clouds"])
+	var haze: Color = sk["haze"]
+	mat.set_shader_parameter("haze", Vector3(haze.r, haze.g, haze.b))
+	env.sky.sky_material = mat
+	env.fog_light_color = haze
+	for it in sk["items"]:
+		var az: float = it["az"]
+		var el: float = it["el"]
+		var dir := Vector3(cos(el) * cos(az), sin(el), cos(el) * sin(az))
+		var q := QuadMesh.new()
+		q.size = it["size"] * SKY_PIXEL * SKY_DISTANCE
+		var m3 := StandardMaterial3D.new()
+		m3.albedo_texture = it["tex"]
+		m3.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		m3.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+		m3.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+		m3.disable_fog = true
+		m3.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+		var mi := MeshInstance3D.new()
+		mi.mesh = q
+		mi.material_override = m3
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mi.position = dir * SKY_DISTANCE
+		sky_root.add_child(mi)
+	if sk["sun"] != null:                        # light coming from the sun sprite
+		var s: Dictionary = sk["sun"]
+		var el_s: float = s["el"]
+		var az_s: float = s["az"]
+		var to_sun := Vector3(cos(el_s) * cos(az_s), sin(el_s), cos(el_s) * sin(az_s))
+		sun.look_at_from_position(Vector3.ZERO, -to_sun, Vector3.UP)
+
+
 func _process(delta: float) -> void:
+	sky_root.position = camera.position
 	if list.has_focus() and not look:
 		return
 	var b := camera.global_transform.basis

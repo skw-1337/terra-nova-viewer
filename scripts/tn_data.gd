@@ -145,7 +145,9 @@ func load_mission(path: String) -> Dictionary:
 				"x": f.decode_s32(8) / 65536.0, "y": f.decode_s32(12) / 65536.0,
 				"z": f.decode_s32(16) / 65536.0,     # height above the ground (only the Nid d'aigle bridge)
 				"heading": f.decode_u16(20) / 65536.0 * TAU})
-	return {"map": LGRes.text(r.data(170)), "groups": groups, "zones": zones, "entities": ents}
+	var sky := LGRes.text(r.data(178).slice(0, 16)) if r.has(178) else ""
+	return {"map": LGRes.text(r.data(170)), "groups": groups, "zones": zones, "entities": ents,
+			"sky": sky}
 
 
 # Map file -> heights, ground tiles (detail + outer grid), planet textures.

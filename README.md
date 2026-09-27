@@ -19,6 +19,7 @@ Lancement : double-clic sur `Lancer le visualiseur.bat` (Godot est dans `C:\Tool
   jeu (relevée en mémoire, arme en main), adaptée aux longueurs d'os de chaque armure ; les poses
   relevées pour une armure précise (`data/soldier_poses.json`, écrit par `_MODS/re/poses.bat`
   pendant une mission) sont prioritaires. Le bipède mécanique est fait de petits modèles 3D.
+- Ciel de chaque mission (SKY0 bleu, SKY0S orage, SKY1 vert, SKY2 orange, SKY3 / SKY4 espace) : plafond de nuages du jeu fondu dans la couleur de brume (aussi celle du brouillard), nuages, soleil et planètes placés à leur azimut / hauteur, lumière venant du soleil ; étoiles générées sur les mondes sans air.
 - Fumées (bâtiments type 61) : colonne de fumée animée du jeu (animation translucide RESTNOBJ 1186).
 - Arbres, buissons et rochers : les vrais sprites du jeu, à la taille que leur donne le moteur.
 - Galerie (dernière entrée de la liste) : les 119 modèles 3D distincts, avec leur nom de fichier
@@ -66,6 +67,11 @@ Lancement : double-clic sur `Lancer le visualiseur.bat` (Godot est dans `C:\Tool
 | RESTNOBJ 1364 + classe | propriétés par type : forme de collision (u16 genre, u16 index de l'entrée rayon / hauteur, entrées de 8 o) |
 | RESMAP.RES 1440 | n° de texture global → réf. (ressource, image) |
 | RESGAME / casques | couleurs 0-16 de la palette (fixes) ; la planète fournit 17-255 |
+| MISSx.RES 178 | nom du fichier ciel (16 o) puis paramètres non décodés |
+| SKYn.RES 152 | images : 0 = texture de nuages 256 × 256 (absente sur SKY3 / SKY4), puis nuages, soleil, lunes, planètes |
+| SKYn.RES 153 | disposition : u16 nombre, u8 couleur de base ; après la texture et l'emplacement de la lune, éléments de 12 o : u16 azimut, u16 hauteur (1/65536 de tour), réf. (image, 152), 4 o |
+| SKYn.RES 150 / 151 | tables de brume (16 × 256 / 8 × 256 couleurs) ; niveau 15 de 150 = couleur entièrement brumeuse |
+| SKYn.RES 154 (SKY3 / SKY4) | champ d'étoiles (table de décalages + données, non décodé) |
 | MISSx.RES 170 / 172 / 173 / 176 / 177 | carte / groupes / entités (50 o : classe, type, … x, y, z en 16.16 à 8 / 12 / 16, cap u16 à 20 ; z = hauteur au-dessus du sol, 0 partout sauf le pont de Nid d'aigle) / coordonnées des zones / noms des zones |
 
 Carreau d'un point : `octet & 0x3F`. Le bit 7 (~57 % des points) n'est pas une orientation (le bit 6 n'est
@@ -118,4 +124,4 @@ tables de transparence du jeu.
 ## À faire
 
 - Soldats : animation de marche ; pieds posés sur les pentes. Tourelles orientables.
-- Ciel de la planète (SKYn.RES).
+- Ciel : position de la lune et paramètres de mission (178), champ d'étoiles 154.

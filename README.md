@@ -19,7 +19,7 @@ Lancement : double-clic sur `Lancer le visualiseur.bat` (Godot est dans `C:\Tool
   jeu (relevée en mémoire, arme en main), adaptée aux longueurs d'os de chaque armure ; les poses
   relevées pour une armure précise (`data/soldier_poses.json`, écrit par `_MODS/re/poses.bat`
   pendant une mission) sont prioritaires. Le bipède mécanique est fait de petits modèles 3D.
-- Ciel de chaque mission (SKY0 bleu, SKY0S orage, SKY1 vert, SKY2 orange, SKY3 / SKY4 espace) : plafond de nuages du jeu fondu dans la couleur de brume (aussi celle du brouillard), nuages, soleil et planètes placés à leur azimut / hauteur, lumière venant du soleil ; étoiles générées sur les mondes sans air.
+- Ciel de chaque mission (SKY0 bleu, SKY0S orage, SKY1 vert, SKY2 orange, SKY3 / SKY4 espace) : plafond de nuages du jeu fondu dans la couleur de brume (aussi celle du brouillard), nuages, soleil et planètes placés à leur azimut / hauteur ; lune et lumière dans la direction propre à chaque carte ; vrai champ d'étoiles du jeu sur les mondes sans air.
 - Fumées (bâtiments type 61) : colonne de fumée animée du jeu (animation translucide RESTNOBJ 1186).
 - Arbres, buissons et rochers : les vrais sprites du jeu, à la taille que leur donne le moteur.
 - Galerie (dernière entrée de la liste) : les 119 modèles 3D distincts, avec leur nom de fichier
@@ -50,6 +50,7 @@ Lancement : double-clic sur `Lancer le visualiseur.bat` (Godot est dans `C:\Tool
 | MAPx.RES 86 | 513 × 513 × 3 octets : type de sol, altitude s16 (× 0,6875 / 256) |
 | MAPx.RES 85 | 257 × 257 × 3 octets, même format, pas de 4, décalage 256 |
 | MAPx.RES 80 | nom du fichier planète (`resplntN.res`) |
+| MAPx.RES 82 | lumière : u16 azimut, s16 hauteur (1/65536 de tour) — le moteur y dessine aussi la lune du ciel ; puis 2 mots non décodés |
 | MAPx.RES 84 | 30 noms de types de sol (16 o) |
 | MAPx.RES 83 | carte de végétation 128 × 128 octets, rangée colonne par colonne (index = x × 128 + y), cases de 4 × 4 unités ; valeur v > 0 → liste 119 + v |
 | MAPx.RES 120-149 | 30 listes de végétation (entrées de 50 o : classe, sous-type, décalages X/Y en 16.16 de 0 à 4 dans la case) |
@@ -66,12 +67,12 @@ Lancement : double-clic sur `Lancer le visualiseur.bat` (Godot est dans `C:\Tool
 | RESTNOBJ 1371 / 1372 / 1373 / 1374 | type d'objet → modèle ou sprite pour les classes 0 (décor), 2 (véhicules), 3 (vaisseaux), 4 (bâtiments) : réf. = u16 image, u16 ressource ; décor et bâtiments ont 2 réf. par type (intact, détruit) |
 | RESTNOBJ 1364 + classe | propriétés par type : forme de collision (u16 genre, u16 index de l'entrée rayon / hauteur, entrées de 8 o) |
 | RESMAP.RES 1440 | n° de texture global → réf. (ressource, image) |
-| RESGAME / casques | couleurs 0-16 de la palette (fixes) ; la planète fournit 17-255 |
+| RESGAME / casques | couleurs 0-16 de la palette (fixes, rampe gris-bleu utilisée aussi par le sol de la planète 3) ; la planète fournit 17-255 |
 | MISSx.RES 178 | nom du fichier ciel (16 o) puis paramètres non décodés |
 | SKYn.RES 152 | images : 0 = texture de nuages 256 × 256 (absente sur SKY3 / SKY4), puis nuages, soleil, lunes, planètes |
-| SKYn.RES 153 | disposition : u16 nombre, u8 couleur de base ; après la texture et l'emplacement de la lune, éléments de 12 o : u16 azimut, u16 hauteur (1/65536 de tour), réf. (image, 152), 4 o |
+| SKYn.RES 153 | disposition : u16 nombre, u8 couleur de base ; 0x04 réf. texture de nuages, 0x0C u16 ressource du champ d'étoiles, 0x14 réf. de la lune ; dès 0x20 éléments de 12 o : u16 azimut, u16 hauteur (1/65536 de tour), réf. (image, 152), 4 o |
 | SKYn.RES 150 / 151 | tables de brume (16 × 256 / 8 × 256 couleurs) ; niveau 15 de 150 = couleur entièrement brumeuse |
-| SKYn.RES 154 (SKY3 / SKY4) | champ d'étoiles (table de décalages + données, non décodé) |
+| SKYn.RES 154 (SKY3 / SKY4) | champ d'étoiles 512 × 320 qui se répète : 32 × 40 cases de 16 × 16 px (les 20 dernières rangées = les 20 premières), u16 décalage par case (0 = vide), puis par case une liste de petits bitmaps terminée par 0xFF : position (y << 4 | x), taille (l << 4 | h), longueur, l × h couleurs |
 | MISSx.RES 170 / 172 / 173 / 176 / 177 | carte / groupes / entités (50 o : classe, type, … x, y, z en 16.16 à 8 / 12 / 16, cap u16 à 20 ; z = hauteur au-dessus du sol, 0 partout sauf le pont de Nid d'aigle) / coordonnées des zones / noms des zones |
 
 Carreau d'un point : `octet & 0x3F`. Le bit 7 (~57 % des points) n'est pas une orientation (le bit 6 n'est
@@ -124,4 +125,4 @@ tables de transparence du jeu.
 ## À faire
 
 - Soldats : animation de marche ; pieds posés sur les pentes. Tourelles orientables.
-- Ciel : position de la lune et paramètres de mission (178), champ d'étoiles 154.
+- Ciel : paramètres de mission (178 : vent des nuages, gravité…), échelle exacte du champ d'étoiles.

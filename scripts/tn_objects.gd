@@ -191,15 +191,15 @@ func smoke_anim(pal: PackedColorArray, pal_key: String) -> Dictionary:
 # ------------------------------------------------------------------ skies
 # SKYn.RES (named by resource 178 of the mission): 152 = images (frame 0: 256 x 256 cloud texture,
 # absent on airless worlds; then clouds, sun, moons, planets), 153 = layout (u16 item count,
-# u8 base color; after the cloud texture and the moon slot, items of 12 bytes: u16 azimuth,
-# u16 elevation (1/65536 turn), ref (frame, 152), 4 bytes), 150 = haze tables (16 levels x 256
-# colors, level 15 = fully hazed).
+# u8 base color; 0x04 = cloud texture ref, 0x0C = u16 star field resource, 0x14 = moon ref;
+# from 0x20 items of 12 bytes: u16 azimuth, u16 elevation (1/65536 turn), ref (frame, 152),
+# 4 bytes), 150 = haze tables (16 levels x 256 colors, level 15 = fully hazed).
 func load_sky(path: String, pal: PackedColorArray) -> Dictionary:
 	var r = LGRes.open(path)
 	if r == null or not r.has(152) or not r.has(153):
 		return {}
 	var f152 := LGRes.frames(r.data(152))
-	var out := {"clouds": null, "items": [], "haze": Color(0.7, 0.76, 0.84), "base": Color.BLACK, "sun": null}
+	var out := {"clouds": null, "items": [], "haze": Color(0.7, 0.76, 0.84), "base": Color.BLACK}
 	if f152.size() > 0 and f152[0].size() > 0x1c and f152[0].decode_u16(8) == 256 and f152[0].decode_u16(10) == 256:
 		var img := _bitmap(f152[0], pal)
 		img.convert(Image.FORMAT_RGB8)
@@ -207,6 +207,16 @@ func load_sky(path: String, pal: PackedColorArray) -> Dictionary:
 		out["clouds"] = ImageTexture.create_from_image(img)
 	var lay: PackedByteArray = LGRes.frames(r.data(153))[0]
 	out["base"] = pal[lay[2]]
+	# moon: ref at 0x14 (frame, 152); the engine draws it in the map's light direction
+	out["moon"] = null
+	if lay.decode_u16(0x16) == 152 and lay.decode_u16(0x14) < f152.size():
+		var mimg := _bitmap(f152[lay.decode_u16(0x14)], pal)
+		if mimg != null:
+			var msize := Vector2(mimg.get_width(), mimg.get_height())
+			mimg.generate_mipmaps()
+			out["moon"] = {"tex": ImageTexture.create_from_image(mimg), "size": msize}
+	var star_res := lay.decode_u16(0x0c)          # star field resource (airless skies)
+	out["stars"] = _star_map(r.data(star_res), pal) if star_res != 0 and r.has(star_res) else null
 	var t150: PackedByteArray = r.data(150)
 	if t150.size() >= 4096:
 		var acc := Vector3.ZERO
@@ -242,11 +252,40 @@ func load_sky(path: String, pal: PackedColorArray) -> Dictionary:
 				"el": lay.decode_u16(k + 2) / 65536.0 * TAU}
 		it.merge(textures[fr])
 		out["items"].append(it)
-		# the sun: a bright, round sprite
-		var sz: Vector2 = it["size"]
-		if it["bright"] > 0.85 and absf(sz.x - sz.y) < 0.3 * sz.x and out["sun"] == null:
-			out["sun"] = it
 	return out
+
+
+# Star field (SKY3 / SKY4 resource 154): 32 x 40 cells of 16 x 16 pixels; u16 offset per cell
+# (0 = empty), each cell a list of small bitmaps ended by 0xFF: position (y << 4 | x in the cell),
+# size (w << 4 | h), record length, then w x h palette indices. The lower 20 rows repeat the upper
+# ones (wrap-around), so the image kept is the 512 x 320 upper half: 360 degrees of azimuth.
+static func _star_map(d: PackedByteArray, pal: PackedColorArray) -> ImageTexture:
+	if d.size() < 2560:
+		return null
+	var img := Image.create(512, 320, false, Image.FORMAT_RGBA8)
+	for c in 640:
+		var off := d.decode_u16(2 * c)
+		if off == 0:
+			continue
+		var cx := (c % 32) * 16
+		var cy := (c / 32) * 16
+		var p := off
+		while p + 2 < d.size() and d[p] != 0xFF:
+			var pos := d[p]
+			var w := d[p + 1] >> 4
+			var h := d[p + 1] & 15
+			var ln := d[p + 2]
+			if ln < 3 or w == 0:
+				break
+			for k in mini(ln - 3, w * h):
+				var v := d[p + 3 + k]
+				var x := cx + (pos & 15) + k % w
+				var y := cy + (pos >> 4) + k / w
+				if v != 0 and x < 512 and y < 320:
+					var col: Color = pal[v]
+					img.set_pixel(x, y, Color(col.r, col.g, col.b, 1.0))
+			p += ln
+	return ImageTexture.create_from_image(img)
 
 
 func ref_for(cls: int, sub: int) -> Vector2i:

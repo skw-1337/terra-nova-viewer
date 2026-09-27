@@ -177,8 +177,14 @@ func load_map(path: String, mission_file: String) -> Dictionary:
 				items.append({"cls": f[0], "sub": f[1], "ox": f.decode_s32(8) / 65536.0, "oy": f.decode_s32(12) / 65536.0})
 		veg_sets.append(items)
 	var veg_map: PackedByteArray = r.data(83)
+	# resource 82: direction of the light (u16 azimuth, u16 elevation, 1/65536 turn), where the
+	# engine also draws the sky's moon
+	var light := Vector2(0.0, TAU / 8.0)
+	var r82: PackedByteArray = r.data(82)
+	if r82.size() >= 4:
+		light = Vector2(r82.decode_u16(0) / 65536.0 * TAU, r82.decode_s16(2) / 65536.0 * TAU)
 	return {"planet": planet, "planet_data": pl, "detail": detail, "outer": outer,
-			"veg_map": veg_map, "veg_sets": veg_sets, "info": info}
+			"veg_map": veg_map, "veg_sets": veg_sets, "info": info, "light": light}
 
 
 # Grid: heights, tile index per vertex (byte & 0x3F), fallback vertex colors, and the tile map
@@ -214,7 +220,7 @@ func _grid(d: PackedByteArray, n: int, pl: Dictionary, key: String = "") -> Dict
 #  3. polish the transition tiles (not the one-sided ones, whose stripes would drift inwards):
 #     keep the turn whose edges best continue the neighbours' edge colors.
 # The result is cached per map file in user://tilemaps.
-const TILEMAP_VERSION := 4
+const TILEMAP_VERSION := 5
 const NB8 := [Vector2i(0, -1), Vector2i(1, -1), Vector2i(1, 0), Vector2i(1, 1), Vector2i(0, 1),
 		Vector2i(-1, 1), Vector2i(-1, 0), Vector2i(-1, -1)]   # N NE E SE S SW W NW
 const SIDE_DX := [0, 1, 0, -1]                                  # N E S W
@@ -438,16 +444,15 @@ func _read_planet(path: String) -> Dictionary:
 	tile_color.fill(Color(0.45, 0.5, 0.35))
 	var rgb_tiles := []
 	var tile_spread := PackedFloat32Array()     # color spread of each tile (low = plain texture)
+	var fp := full_palette(pal)                 # tiles also use colors 1-16 (planet 3: a lot)
 	for t in count:
 		var rgb := PackedByteArray()
 		rgb.resize(64 * 64 * 3)
 		var acc := Vector3.ZERO
 		var acc2 := Vector3.ZERO
 		for p in 4096:
-			var idx := raw[t * 4096 + p] - 17
-			var c := Vector3.ZERO
-			if idx >= 0 and 3 * idx + 2 < pal.size():
-				c = Vector3(pal[3 * idx], pal[3 * idx + 1], pal[3 * idx + 2])
+			var fc: Color = fp[raw[t * 4096 + p]]
+			var c := Vector3(fc.r8, fc.g8, fc.b8)
 			rgb[3 * p] = int(c.x)
 			rgb[3 * p + 1] = int(c.y)
 			rgb[3 * p + 2] = int(c.z)

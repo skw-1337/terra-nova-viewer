@@ -254,7 +254,7 @@ func _load(index: int) -> void:
 		world.add_child(plane)
 	pal = pl["palette"] if pl.has("palette") else data.full_palette(PackedByteArray())
 	pal_key = m["planet"]
-	_set_sky(data.resolve(entry["file"], mis.get("sky", "")) if mis.get("sky", "") != "" else "")
+	_set_sky(data.resolve(entry["file"], mis.get("sky", "")) if mis.get("sky", "") != "" else "", m["light"])
 	var nveg := _add_vegetation(m)
 	var counts := {}
 	for e in mis["entities"]:
@@ -810,12 +810,15 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 # The mission's sky (see TNObjects.load_sky): shader sky with the cloud texture and the haze color
-# (also the fog color), sprites placed by azimuth / elevation, sunlight from the sun sprite.
-func _set_sky(path: String) -> void:
+# (also the fog color), sprites placed by azimuth / elevation, the moon and the sunlight in the
+# map's light direction (map resource 82).
+func _set_sky(path: String, light: Vector2) -> void:
 	for c in sky_root.get_children():
 		c.queue_free()
 	var sk: Dictionary = objects.load_sky(path, pal) if objects_ok and path != "" else {}
-	sun.rotation_degrees = DEFAULT_SUN
+	# the map's light direction (azimuth, elevation; game y axis = Godot z)
+	var to_light := Vector3(cos(light.y) * cos(light.x), sin(light.y), cos(light.y) * sin(light.x))
+	sun.look_at_from_position(Vector3.ZERO, -to_light, Vector3.UP if absf(to_light.y) < 0.99 else Vector3.FORWARD)
 	if sk.is_empty():
 		var sm := ProceduralSkyMaterial.new()
 		sm.sky_top_color = Color(0.32, 0.5, 0.78)
@@ -827,13 +830,22 @@ func _set_sky(path: String) -> void:
 	var mat := ShaderMaterial.new()
 	mat.shader = SKY_SHADER
 	mat.set_shader_parameter("has_clouds", sk["clouds"] != null)
+	mat.set_shader_parameter("has_stars", sk.get("stars") != null)
+	if sk.get("stars") != null:
+		mat.set_shader_parameter("stars", sk["stars"])
 	if sk["clouds"] != null:
 		mat.set_shader_parameter("clouds", sk["clouds"])
 	var haze: Color = sk["haze"]
 	mat.set_shader_parameter("haze", Vector3(haze.r, haze.g, haze.b))
 	env.sky.sky_material = mat
 	env.fog_light_color = haze
-	for it in sk["items"]:
+	var sprites: Array = sk["items"].duplicate()
+	if sk.get("moon") != null:
+		var moon: Dictionary = sk["moon"].duplicate()
+		moon["az"] = light.x
+		moon["el"] = light.y
+		sprites.append(moon)
+	for it in sprites:
 		var az: float = it["az"]
 		var el: float = it["el"]
 		var dir := Vector3(cos(el) * cos(az), sin(el), cos(el) * sin(az))
@@ -852,12 +864,6 @@ func _set_sky(path: String) -> void:
 		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		mi.position = dir * SKY_DISTANCE
 		sky_root.add_child(mi)
-	if sk["sun"] != null:                        # light coming from the sun sprite
-		var s: Dictionary = sk["sun"]
-		var el_s: float = s["el"]
-		var az_s: float = s["az"]
-		var to_sun := Vector3(cos(el_s) * cos(az_s), sin(el_s), cos(el_s) * sin(az_s))
-		sun.look_at_from_position(Vector3.ZERO, -to_sun, Vector3.UP)
 
 
 func _process(delta: float) -> void:

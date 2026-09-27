@@ -275,7 +275,10 @@ func _add_object(m: Dictionary, cls: int, sub: int, x: float, y: float, heading:
 			ab.size = Vector3(2.5, 0.8, 3.0)
 			mesh = ab
 			mat = mats["friend"] if data.is_friendly(name) else mats["enemy"]
-			lift = 8.0
+			# the mission files store no altitude (always 0): ships sit on the ground / dock,
+			# only probes are shown hovering a little
+			var low3 := name.to_lower()
+			lift = 3.0 if low3.contains("sonde") or low3.contains("probe") else 0.0
 		_:
 			var bb := BoxMesh.new()
 			bb.size = Vector3(4, 3, 4)
